@@ -1,0 +1,22 @@
+[Unit]
+Description=ThinkPad battery charge-policy and calibration daemon
+Documentation=https://git.airies.net/vifair22/thinkbatt
+# The battery sysfs and thinkpad_acpi's charge-control attributes must exist.
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/thinkbattd
+# Writes charge thresholds and charge_behaviour under /sys; needs root.
+User=root
+RuntimeDirectory=thinkbattd
+RuntimeDirectoryMode=0755
+StateDirectory=thinkbattd
+StateDirectoryMode=0755
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

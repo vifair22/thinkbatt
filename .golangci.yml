@@ -1,0 +1,35 @@
+# golangci-lint configuration (schema v2).
+#
+# The Go static-analysis gate. The version is pinned in .gitlab-ci.yml so a
+# lint release cannot red an unrelated change; keep this file and that pin in
+# step.
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  # The v2 default set is errcheck, govet, ineffassign, staticcheck, unused.
+  # errorlint enforces %w wrapping and errors.Is/As.
+  enable:
+    - errorlint
+  settings:
+    errcheck:
+      # Log and diagnostic writes have no useful recovery.
+      exclude-functions:
+        - fmt.Fprintf
+        - fmt.Fprint
+        - fmt.Fprintln
+    staticcheck:
+      checks:
+        - all
+        - -QF*
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - git.airies.net/vifair22/thinkbatt

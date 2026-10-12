@@ -1,0 +1,90 @@
+# thinkbatt CI pipeline.
+#
+# Stages follow the project standard (test -> analyze -> coverage -> build).
+# There is no deploy stage yet: the artifacts are two static binaries, a
+# systemd unit and a config, installed per machine by hand. Pre-1.0, so master
+# is worked on directly and branch protection is not wired yet.
+
+stages:
+  - test
+  - analyze
+  - coverage
+  - build
+
+variables:
+  GIT_DEPTH: "10"
+  GO_IMAGE: golang:1.26-trixie
+  # Pinned: a tool release must not be able to red an unrelated change.
+  GOLANGCI_VERSION: v2.12.2
+  GOTESTSUM_VERSION: v1.13.0
+  COVERAGE_MIN: "80"
+
+default:
+  tags: [docker]
+
+#-------------------------------------------------------------------------------
+# test
+
+test:go:
+  stage: test
+  image: $GO_IMAGE
+  # gotestsum is run, not added to go.mod: it only converts `go test -json`
+  # output into JUnit XML for the MR Tests tab; the module stays stdlib-only.
+  script:
+    - mkdir -p build/junit
+    - >
+      go run gotest.tools/gotestsum@${GOTESTSUM_VERSION}
+      --junitfile build/junit/go.junit.xml -- -race ./...
+  artifacts:
+    when: always
+    reports:
+      junit: build/junit/go.junit.xml
+    expire_in: 1 week
+
+#-------------------------------------------------------------------------------
+# analyze
+
+analyze:go:
+  stage: analyze
+  image: $GO_IMAGE
+  needs: ["test:go"]
+  before_script:
+    # The prebuilt, checksum-verified binary rather than `go install`, so the
+    # bundled gofmt cannot drift with the image's Go version.
+    - >
+      curl -sSfL
+      "https://raw.githubusercontent.com/golangci/golangci-lint/${GOLANGCI_VERSION}/install.sh"
+      | sh -s -- -b "$(go env GOPATH)/bin" "${GOLANGCI_VERSION}"
+  script:
+    - go vet ./...
+    - golangci-lint run ./...
+
+#-------------------------------------------------------------------------------
+# coverage
+
+coverage:go:
+  stage: coverage
+  image: $GO_IMAGE
+  needs: ["test:go"]
+  script:
+    - make coverage COVERAGE_MIN=${COVERAGE_MIN}
+  coverage: '/^total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    paths:
+      - build/coverage/
+    expire_in: 1 week
+
+#-------------------------------------------------------------------------------
+# build
+
+build:bins:
+  stage: build
+  image: $GO_IMAGE
+  script:
+    - make
+    - ./build/bin/thinkbattd -version
+    - ./build/bin/thinkbatt version
+  artifacts:
+    paths:
+      - build/bin/
+    expire_in: 4 weeks
