@@ -159,6 +159,28 @@ func TestChargeTimeout(t *testing.T) {
 	assertResting(t, sim, 75, 80)
 }
 
+func TestChargeComplete(t *testing.T) {
+	tests := []struct {
+		name string
+		r    battery.Reading
+		want bool
+	}{
+		{"full at 100", battery.Reading{Status: battery.StatusFull, Capacity: 100}, true},
+		{"not charging near full (gauge rounding)", battery.Reading{Status: battery.StatusNotCharging, Capacity: 98}, true},
+		{"not charging exactly at the mark", battery.Reading{Status: battery.StatusNotCharging, Capacity: fullMark}, true},
+		{"still charging at 100", battery.Reading{Status: battery.StatusCharging, Capacity: 100}, false},
+		{"not charging but below the mark", battery.Reading{Status: battery.StatusNotCharging, Capacity: fullMark - 1}, false},
+		{"brief pause mid-charge", battery.Reading{Status: battery.StatusNotCharging, Capacity: 60}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := chargeComplete(tc.r); got != tc.want {
+				t.Errorf("chargeComplete(%+v) = %v, want %v", tc.r, got, tc.want)
+			}
+		})
+	}
+}
+
 func assertResting(t *testing.T, sim *battery.Sim, start, stop int) {
 	t.Helper()
 	if b, _ := sim.Behaviour(); b != battery.BehaviourAuto {

@@ -160,10 +160,39 @@ func (s *Sysfs) Thresholds() (start, stop int, err error) {
 }
 
 func (s *Sysfs) SetThresholds(start, stop int) error {
-	if err := writeStr(s.batPath("charge_control_end_threshold"), strconv.Itoa(stop)); err != nil {
+	// The kernel enforces start <= end on every individual write, so writing the
+	// two in a fixed order can transiently violate it: lowering 99/100 to 75/80
+	// by writing end=80 first is rejected while start is still 99, and raising
+	// 75/80 to 99/100 by writing start=99 first is rejected while end is still
+	// 80. Pick the order from the current end so neither write ever makes start
+	// exceed end.
+	curEnd, err := readInt(s.batPath("charge_control_end_threshold"))
+	if err != nil {
+		// No readable current end to order against (first set, or the attribute
+		// is absent). Writing start first is safe whenever start <= stop, which
+		// the caller guarantees; a genuinely missing attribute fails the write.
+		curEnd = int64(stop)
+	}
+	startPath := s.batPath("charge_control_start_threshold")
+	endPath := s.batPath("charge_control_end_threshold")
+	if startBeforeEnd(int(curEnd), start) {
+		if err := writeStr(startPath, strconv.Itoa(start)); err != nil {
+			return err
+		}
+		return writeStr(endPath, strconv.Itoa(stop))
+	}
+	if err := writeStr(endPath, strconv.Itoa(stop)); err != nil {
 		return err
 	}
-	return writeStr(s.batPath("charge_control_start_threshold"), strconv.Itoa(start))
+	return writeStr(startPath, strconv.Itoa(start))
+}
+
+// startBeforeEnd reports whether the start threshold must be written before the
+// end threshold, given the end threshold currently in effect. Writing start
+// first is safe only when the new start still fits under the current end
+// (start <= curEnd); otherwise the end must be raised first.
+func startBeforeEnd(curEnd, newStart int) bool {
+	return newStart <= curEnd
 }
 
 func (s *Sysfs) Supported() ([]Behaviour, error) {

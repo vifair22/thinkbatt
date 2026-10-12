@@ -97,6 +97,50 @@ func TestSysfsThresholds(t *testing.T) {
 	}
 }
 
+func TestSysfsSetThresholdsOrder(t *testing.T) {
+	// The kernel rejects a write that would make start exceed end. A plain-file
+	// fake cannot reproduce that rejection, so the write ORDER is asserted via
+	// startBeforeEnd; this case guards that SetThresholds reads the current end
+	// and lands the right final values when lowering a high band to a low one.
+	attrs := baseAttrs()
+	attrs["charge_control_start_threshold"] = "99"
+	attrs["charge_control_end_threshold"] = "100"
+	root := writeTree(t, attrs, "1")
+	s := NewSysfs(root, "BAT0")
+	if err := s.SetThresholds(75, 80); err != nil {
+		t.Fatalf("SetThresholds lowering from 99/100: %v", err)
+	}
+	start, stop, err := s.Thresholds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if start != 75 || stop != 80 {
+		t.Errorf("thresholds = %d/%d, want 75/80", start, stop)
+	}
+}
+
+func TestStartBeforeEnd(t *testing.T) {
+	tests := []struct {
+		name     string
+		curEnd   int
+		newStart int
+		want     bool
+	}{
+		{"lower band writes start first", 100, 75, true},
+		{"raise band writes end first", 80, 99, false},
+		{"equal to current end writes start first", 80, 80, true},
+		{"well under current end writes start first", 80, 10, true},
+		{"just above current end writes end first", 80, 81, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := startBeforeEnd(tc.curEnd, tc.newStart); got != tc.want {
+				t.Errorf("startBeforeEnd(%d, %d) = %v, want %v", tc.curEnd, tc.newStart, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSysfsBehaviour(t *testing.T) {
 	root := writeTree(t, baseAttrs(), "1")
 	s := NewSysfs(root, "BAT0")

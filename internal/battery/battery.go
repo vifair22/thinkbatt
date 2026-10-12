@@ -53,8 +53,10 @@ type Battery interface {
 	HasThresholds() bool
 	// Thresholds returns the current start and stop percentages.
 	Thresholds() (start, stop int, err error)
-	// SetThresholds writes stop first, then start, so start is never briefly
-	// above stop whatever the previous values were.
+	// SetThresholds sets the start and stop percentages. It orders the two
+	// underlying writes from the current values so start is never briefly above
+	// stop, which the kernel rejects: start first when lowering the band, stop
+	// first when raising it.
 	SetThresholds(start, stop int) error
 
 	// Supported returns the charge_behaviour tokens this machine offers. A

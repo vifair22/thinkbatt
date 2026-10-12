@@ -43,6 +43,15 @@ const (
 	defaultDischargeTimeout = 6 * time.Hour
 )
 
+// fullMark is the state of charge at or above which a stopped charger counts as
+// a completed full charge. It sits a few points below 100 to absorb fuel-gauge
+// rounding and the last percent or two an EC may decline to top off: with
+// end=100 the highest usable start threshold is 99, the very value a gauge
+// rounds a near-full pack up to, so the EC will not resume charging and Linux
+// never reports 99. Treating a stopped charger near full as done lets a
+// calibration that begins near full proceed instead of waiting out the timeout.
+const fullMark = 97
+
 func (p *Params) withDefaults() {
 	if p.PollInterval <= 0 {
 		p.PollInterval = defaultPoll
@@ -194,8 +203,17 @@ func (e *Engine) waitFull(ctx context.Context, timeout time.Duration) error {
 		if !r.ACOnline {
 			return false, errAbort{"AC lost during charge"}
 		}
-		return r.Capacity >= 99 && r.Status != battery.StatusCharging, nil
+		return chargeComplete(r), nil
 	})
+}
+
+// chargeComplete reports whether a charge-to-full phase is done. The charger has
+// stopped at the top when the pack is no longer Charging (the EC reports Full,
+// or Not charging at its end threshold); a pack already near full will not
+// resume charging at all, so a stopped charger at or above fullMark counts as
+// full. A brief not-charging pause at a lower state of charge is not full.
+func chargeComplete(r battery.Reading) bool {
+	return r.Status != battery.StatusCharging && r.Capacity >= fullMark
 }
 
 // waitFloor polls a force-discharge until the pack falls to the floor. AC loss
