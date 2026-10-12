@@ -39,7 +39,10 @@ DAEMON_BIN := $(BIN_DIR)/thinkbattd
 CLI_BIN    := $(BIN_DIR)/thinkbatt
 
 .DEFAULT_GOAL := all
-.PHONY: all test coverage analyze check install uninstall clean version
+# The build targets are phony: go build is itself incremental and the correct
+# arbiter of staleness, so always invoke it rather than tracking sources here.
+.PHONY: all test coverage analyze check install uninstall clean version \
+        $(DAEMON_BIN) $(CLI_BIN)
 
 all: $(DAEMON_BIN) $(CLI_BIN)
 

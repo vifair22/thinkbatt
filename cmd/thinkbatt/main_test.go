@@ -40,7 +40,7 @@ func (h *stubHandler) SetBand(start, stop int) error {
 func serveStub(t *testing.T, h control.Handler) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ctl.sock")
-	srv := control.NewServer(path, h, nil)
+	srv := control.NewServer(path, "", h, nil)
 	go srv.Serve() //nolint:errcheck
 	t.Cleanup(func() { _ = srv.Close() })
 	deadline := time.Now().Add(2 * time.Second)

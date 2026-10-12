@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"strconv"
 	"sync"
 )
@@ -16,21 +17,45 @@ import (
 // Handler. It owns the socket file: Serve removes a stale one first, and Close
 // stops accepting and removes it.
 type Server struct {
-	path string
-	h    Handler
-	log  *slog.Logger
+	path  string
+	group string // if set, socket is root:group mode 0660; else world-accessible 0666
+	h     Handler
+	log   *slog.Logger
 
 	mu  sync.Mutex
 	ln  net.Listener
 	off bool
 }
 
-// NewServer builds a Server for the given socket path and handler.
-func NewServer(path string, h Handler, log *slog.Logger) *Server {
+// NewServer builds a Server for the given socket path and handler. group, if
+// non-empty, names a system group granted access to the socket; empty leaves
+// the socket world-accessible (fine for a single-user machine).
+func NewServer(path, group string, h Handler, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Server{path: path, h: h, log: log}
+	return &Server{path: path, group: group, h: h, log: log}
+}
+
+// applyPerms makes the freshly created socket reachable by the intended user.
+// The daemon runs as root, so without this the socket is root-only and the CLI
+// cannot connect.
+func (s *Server) applyPerms() error {
+	if s.group == "" {
+		return os.Chmod(s.path, 0o666)
+	}
+	g, err := user.LookupGroup(s.group)
+	if err != nil {
+		return fmt.Errorf("lookup socket group %q: %w", s.group, err)
+	}
+	gid, err := strconv.Atoi(g.Gid)
+	if err != nil {
+		return fmt.Errorf("parse gid for group %q: %w", s.group, err)
+	}
+	if err := os.Chown(s.path, -1, gid); err != nil {
+		return fmt.Errorf("chown socket to group %q: %w", s.group, err)
+	}
+	return os.Chmod(s.path, 0o660)
 }
 
 // Serve listens and handles connections until Close is called. A leftover
@@ -51,6 +76,12 @@ func (s *Server) Serve() error {
 		_ = ln.Close()
 		_ = os.Remove(s.path)
 		return nil
+	}
+
+	if err := s.applyPerms(); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(s.path)
+		return err
 	}
 
 	for {

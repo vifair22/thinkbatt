@@ -15,12 +15,13 @@ import (
 
 // Config is the daemon's runtime policy.
 type Config struct {
-	BandStart        int  // resume-charging threshold, percent
-	BandStop         int  // stop-charging threshold, percent (the resting ceiling)
-	CalibFloor       int  // lowest state of charge a calibration discharges to
-	CalibEveryCycles int  // run calibration after this many cycles since the last
-	CalibEveryDays   int  // or after this many days since the last, whichever first
-	CalibEnabled     bool // master switch for automatic calibration
+	BandStart        int    // resume-charging threshold, percent
+	BandStop         int    // stop-charging threshold, percent (the resting ceiling)
+	CalibFloor       int    // lowest state of charge a calibration discharges to
+	CalibEveryCycles int    // run calibration after this many cycles since the last
+	CalibEveryDays   int    // or after this many days since the last, whichever first
+	CalibEnabled     bool   // master switch for automatic calibration
+	SocketGroup      string // group that may use the control socket; empty = world-accessible
 }
 
 // Default returns the built-in policy used when a key or the whole file is
@@ -104,6 +105,9 @@ func (c *Config) set(key, val string) error {
 			return fmt.Errorf("%s: %q is not a boolean", key, val)
 		}
 		c.CalibEnabled = b
+		return nil
+	case "socket_group":
+		c.SocketGroup = val
 		return nil
 	default:
 		return fmt.Errorf("unknown key %q", key)

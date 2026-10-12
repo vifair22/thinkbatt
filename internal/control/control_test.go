@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,7 +40,7 @@ func (h *fakeHandler) SetBand(start, stop int) error {
 func serve(t *testing.T, h Handler) (Client, func()) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ctl.sock")
-	srv := NewServer(path, h, nil)
+	srv := NewServer(path, "", h, nil)
 	go srv.Serve() //nolint:errcheck // Close returns the result in tests that care
 	// Wait for the socket to appear.
 	deadline := time.Now().Add(2 * time.Second)
@@ -109,7 +110,7 @@ func TestErrorResponses(t *testing.T) {
 
 func TestMalformedRequest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ctl.sock")
-	srv := NewServer(path, &fakeHandler{}, nil)
+	srv := NewServer(path, "", &fakeHandler{}, nil)
 	go srv.Serve() //nolint:errcheck
 	defer func() { _ = srv.Close() }()
 	deadline := time.Now().Add(2 * time.Second)
@@ -149,7 +150,7 @@ func TestHandlerErrorPropagates(t *testing.T) {
 }
 
 func TestCloseBeforeServe(t *testing.T) {
-	srv := NewServer(filepath.Join(t.TempDir(), "ctl.sock"), &fakeHandler{}, nil)
+	srv := NewServer(filepath.Join(t.TempDir(), "ctl.sock"), "", &fakeHandler{}, nil)
 	if err := srv.Close(); err != nil {
 		t.Errorf("Close before Serve: %v", err)
 	}
@@ -157,7 +158,7 @@ func TestCloseBeforeServe(t *testing.T) {
 
 func TestConnClosedBeforeRequest(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ctl.sock")
-	srv := NewServer(path, &fakeHandler{}, nil)
+	srv := NewServer(path, "", &fakeHandler{}, nil)
 	go srv.Serve() //nolint:errcheck
 	defer func() { _ = srv.Close() }()
 	deadline := time.Now().Add(2 * time.Second)
@@ -175,6 +176,38 @@ func TestConnClosedBeforeRequest(t *testing.T) {
 	}
 	_ = conn.Close()
 	time.Sleep(20 * time.Millisecond)
+}
+
+func TestApplyPerms(t *testing.T) {
+	// Operate on a plain temp file; applyPerms only chmod/chowns s.path.
+	f := filepath.Join(t.TempDir(), "sock")
+	if err := os.WriteFile(f, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// No group: world-accessible.
+	if err := (&Server{path: f}).applyPerms(); err != nil {
+		t.Fatalf("applyPerms (no group): %v", err)
+	}
+
+	// Unknown group: error.
+	if err := (&Server{path: f, group: "no-such-group-zzz"}).applyPerms(); err == nil {
+		t.Errorf("applyPerms with a nonexistent group should error")
+	}
+
+	// The caller's own primary group: chown to a group you belong to succeeds
+	// as a non-root user, and as root (CI) chowning anywhere succeeds.
+	cur, err := user.Current()
+	if err != nil {
+		t.Skip("cannot determine current user")
+	}
+	g, err := user.LookupGroupId(cur.Gid)
+	if err != nil {
+		t.Skip("cannot resolve current group")
+	}
+	if err := (&Server{path: f, group: g.Name}).applyPerms(); err != nil {
+		t.Errorf("applyPerms with own group: %v", err)
+	}
 }
 
 func TestDialFailure(t *testing.T) {

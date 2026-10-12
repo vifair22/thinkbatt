@@ -128,7 +128,7 @@ func serve(ctx context.Context, o serveOpts) error {
 		}
 	}
 
-	srv := control.NewServer(o.sockPath, d, o.log)
+	srv := control.NewServer(o.sockPath, o.cfg.SocketGroup, d, o.log)
 	ticker := time.NewTicker(o.checkEvery)
 	defer ticker.Stop()
 
