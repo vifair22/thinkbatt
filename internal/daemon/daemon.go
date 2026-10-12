@@ -40,8 +40,9 @@ type Options struct {
 	Profile   caps.Profile
 	Config    config.Config
 	StatePath string
-	Clock     calib.Clock // engine clock; nil uses the real clock
-	Inhibitor Inhibitor   // nil uses a no-op
+	Clock     calib.Clock           // engine clock; nil uses the real clock
+	Inhibitor Inhibitor             // nil uses a no-op
+	Assist    calib.DischargeAssist // discharge load controller; nil runs discharge at idle draw
 	Logger    *slog.Logger
 }
 
@@ -53,6 +54,8 @@ type Daemon struct {
 	clock     calib.Clock
 	inhibitor Inhibitor
 	log       *slog.Logger
+
+	assist calib.DischargeAssist
 
 	mu        sync.Mutex
 	cfg       config.Config
@@ -84,6 +87,7 @@ func New(opts Options) (*Daemon, error) {
 		statePath: opts.StatePath,
 		clock:     opts.Clock,
 		inhibitor: opts.Inhibitor,
+		assist:    opts.Assist,
 		log:       opts.Logger,
 		cfg:       opts.Config,
 		st:        st,
@@ -155,9 +159,14 @@ func (d *Daemon) startLocked(reason string) {
 	d.wg.Add(1)
 	d.log.Info("calibration starting", "reason", reason)
 	params := calib.Params{
-		BandStart: d.cfg.BandStart,
-		BandStop:  d.cfg.BandStop,
-		Floor:     d.cfg.CalibFloor,
+		BandStart:        d.cfg.BandStart,
+		BandStop:         d.cfg.BandStop,
+		Floor:            d.cfg.CalibFloor,
+		RestAtFull:       time.Duration(d.cfg.RestAtFullMinutes) * time.Minute,
+		RestAtFloor:      time.Duration(d.cfg.RestAtFloorMinutes) * time.Minute,
+		DischargeCRate:   d.cfg.DischargeCRate,
+		ChargeTimeout:    time.Duration(d.cfg.ChargeTimeoutHours) * time.Hour,
+		DischargeTimeout: time.Duration(d.cfg.DischargeTimeoutHours) * time.Hour,
 	}
 	go d.run(ctx, cancel, params)
 }
@@ -174,7 +183,7 @@ func (d *Daemon) run(ctx context.Context, cancel context.CancelFunc, params cali
 	defer release()
 
 	started := d.clock.Now()
-	engine := calib.New(d.bat, d.clock, d.log, params)
+	engine := calib.New(d.bat, d.clock, d.log, params, d.assist)
 	res, runErr := engine.Run(ctx)
 
 	rec := state.Calibration{

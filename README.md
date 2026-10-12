@@ -4,9 +4,9 @@ Battery charge-policy and fuel-gauge calibration daemon for ThinkPads.
 
 It owns the resting charge band (so the pack spends its life in a narrow,
 low-wear window), and runs a periodic fuel-gauge **learning cycle** - charge
-full, force-discharge to a floor, recharge full - so the pack's gauge re-anchors
-its learned full-charge capacity instead of drifting. A control CLI reports
-status and drives it by hand.
+full, rest, force-discharge to a floor at a controlled rate, rest, recharge full
+- so the pack's gauge re-anchors its learned full-charge capacity instead of
+drifting. A control CLI reports status and drives it by hand.
 
 It is one binary for the whole fleet: it detects at runtime what a given machine
 can do and does only that. A coreboot ThinkPad that exposes `force-discharge`

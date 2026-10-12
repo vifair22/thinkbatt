@@ -196,9 +196,33 @@ func (s *Sim) Read() (Reading, error) {
 		EnergyFullUWh:       s.energyFullUWh,
 		EnergyFullDesignUWh: s.energyFullDesignUWh,
 		VoltageNowUV:        s.voltageNowUV,
+		PowerNowUW:          s.powerLocked(cap),
 		CycleCount:          s.cycleCount,
 		ACOnline:            s.acOnline,
 	}, nil
+}
+
+// powerLocked models instantaneous pack power from the active rate: a rate in
+// percent-per-hour times the learned full capacity (uWh) over 100 is microwatts.
+// A pack at rest (inhibit-charge on AC, or auto-not-charging on AC) draws zero.
+func (s *Sim) powerLocked(cap int) int64 {
+	rate := 0.0
+	switch s.behaviour {
+	case BehaviourForceDischarge:
+		rate = s.dischargeRate
+	case BehaviourInhibitCharge:
+		if !s.acOnline {
+			rate = s.dischargeRate
+		}
+	default: // auto
+		switch {
+		case !s.acOnline:
+			rate = s.dischargeRate
+		case s.charging && cap < s.stop:
+			rate = s.chargeRate
+		}
+	}
+	return int64(rate / 100 * float64(s.energyFullUWh))
 }
 
 func (s *Sim) statusLocked(cap int) Status {

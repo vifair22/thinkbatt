@@ -37,7 +37,7 @@ func TestRunSupportedError(t *testing.T) {
 	sim := fullSetSim(79)
 	fb := &failBat{Sim: sim, failSupported: true}
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
-	_, err := New(fb, clk, nil, stdParams()).Run(context.Background())
+	_, err := New(fb, clk, nil, stdParams(), nil).Run(context.Background())
 	if err == nil {
 		t.Errorf("expected error when Supported fails")
 	}
@@ -49,7 +49,7 @@ func TestRunSetBehaviourError(t *testing.T) {
 	sim := fullSetSim(79)
 	fb := &failBat{Sim: sim, failSetBehaviour: true}
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
-	res, err := New(fb, clk, nil, stdParams()).Run(context.Background())
+	res, err := New(fb, clk, nil, stdParams(), nil).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -63,7 +63,7 @@ func TestDischargeTimeout(t *testing.T) {
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
 	p := stdParams()
 	p.DischargeTimeout = time.Minute // reaches full, then cannot drain in time
-	res, err := New(sim, clk, nil, p).Run(context.Background())
+	res, err := New(sim, clk, nil, p, nil).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestDrainNoopWhenStopIsFull(t *testing.T) {
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
 	p := stdParams()
 	p.BandStop = 100 // after the recharge to full there is nothing to drain
-	res, err := New(sim, clk, nil, p).Run(context.Background())
+	res, err := New(sim, clk, nil, p, nil).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}

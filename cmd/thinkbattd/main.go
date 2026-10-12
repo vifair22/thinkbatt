@@ -17,10 +17,12 @@ import (
 	"time"
 
 	"git.airies.net/vifair22/thinkbatt/internal/battery"
+	"git.airies.net/vifair22/thinkbatt/internal/calib"
 	"git.airies.net/vifair22/thinkbatt/internal/caps"
 	"git.airies.net/vifair22/thinkbatt/internal/config"
 	"git.airies.net/vifair22/thinkbatt/internal/control"
 	"git.airies.net/vifair22/thinkbatt/internal/daemon"
+	"git.airies.net/vifair22/thinkbatt/internal/load"
 )
 
 // Set at link time with -ldflags "-X main.version=... -X main.buildTime=...".
@@ -110,12 +112,30 @@ func serve(ctx context.Context, o serveOpts) error {
 		}
 	}
 
+	// The discharge assist holds the force-discharge legs at the configured
+	// C-rate by driving a controlled CPU load, reading the pack's power_now as
+	// feedback. Only machines that can force-discharge calibrate, so only they
+	// need it.
+	var assist calib.DischargeAssist
+	if profile.CanCalibrate() {
+		bat := o.bat
+		measure := func() (float64, error) {
+			r, err := bat.Read()
+			if err != nil {
+				return 0, err
+			}
+			return float64(r.PowerNowUW) / 1e6, nil
+		}
+		assist = load.NewAssist(0, measure, load.RealClock{}, o.log)
+	}
+
 	d, err := daemon.New(daemon.Options{
 		Battery:   o.bat,
 		Profile:   profile,
 		Config:    o.cfg,
 		StatePath: o.statePath,
 		Inhibitor: o.inhibitor,
+		Assist:    assist,
 		Logger:    o.log,
 	})
 	if err != nil {

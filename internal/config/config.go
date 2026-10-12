@@ -22,6 +22,12 @@ type Config struct {
 	CalibEveryDays   int    // or after this many days since the last, whichever first
 	CalibEnabled     bool   // master switch for automatic calibration
 	SocketGroup      string // group that may use the control socket; empty = world-accessible
+
+	RestAtFullMinutes     int     // relaxation at full before discharging (0 = skip)
+	RestAtFloorMinutes    int     // relaxation at the floor before recharging (0 = skip)
+	DischargeCRate        float64 // discharge rate, fraction of design capacity per hour (0 = idle)
+	ChargeTimeoutHours    int     // bound on each charge phase
+	DischargeTimeoutHours int     // bound on each discharge phase
 }
 
 // Default returns the built-in policy used when a key or the whole file is
@@ -29,12 +35,17 @@ type Config struct {
 // discharge never trips the OS low-battery handler.
 func Default() Config {
 	return Config{
-		BandStart:        75,
-		BandStop:         80,
-		CalibFloor:       7,
-		CalibEveryCycles: 30,
-		CalibEveryDays:   90,
-		CalibEnabled:     true,
+		BandStart:             75,
+		BandStop:              80,
+		CalibFloor:            7,
+		CalibEveryCycles:      30,
+		CalibEveryDays:        90,
+		CalibEnabled:          true,
+		RestAtFullMinutes:     60,
+		RestAtFloorMinutes:    60,
+		DischargeCRate:        0.2,
+		ChargeTimeoutHours:    5,
+		DischargeTimeoutHours: 8,
 	}
 }
 
@@ -109,9 +120,28 @@ func (c *Config) set(key, val string) error {
 	case "socket_group":
 		c.SocketGroup = val
 		return nil
+	case "rest_at_full_minutes":
+		return assignInt(&c.RestAtFullMinutes, key, val)
+	case "rest_at_floor_minutes":
+		return assignInt(&c.RestAtFloorMinutes, key, val)
+	case "discharge_c_rate":
+		return assignFloat(&c.DischargeCRate, key, val)
+	case "charge_timeout_hours":
+		return assignInt(&c.ChargeTimeoutHours, key, val)
+	case "discharge_timeout_hours":
+		return assignInt(&c.DischargeTimeoutHours, key, val)
 	default:
 		return fmt.Errorf("unknown key %q", key)
 	}
+}
+
+func assignFloat(dst *float64, key, val string) error {
+	v, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return fmt.Errorf("%s: %q is not a number", key, val)
+	}
+	*dst = v
+	return nil
 }
 
 func assignInt(dst *int, key, val string) error {
@@ -147,6 +177,23 @@ func (c Config) Validate() error {
 	}
 	if c.CalibEveryDays < 1 {
 		return fmt.Errorf("calib_every_days %d must be at least 1", c.CalibEveryDays)
+	}
+	if c.RestAtFullMinutes < 0 || c.RestAtFullMinutes > 720 {
+		return fmt.Errorf("rest_at_full_minutes %d out of range 0-720", c.RestAtFullMinutes)
+	}
+	if c.RestAtFloorMinutes < 0 || c.RestAtFloorMinutes > 720 {
+		return fmt.Errorf("rest_at_floor_minutes %d out of range 0-720", c.RestAtFloorMinutes)
+	}
+	// A C-rate above 2C is implausible on a laptop and likely a typo; 0 disables
+	// the assist (idle discharge), which then needs a generous discharge timeout.
+	if c.DischargeCRate < 0 || c.DischargeCRate > 2 {
+		return fmt.Errorf("discharge_c_rate %.3f out of range 0-2", c.DischargeCRate)
+	}
+	if c.ChargeTimeoutHours < 1 {
+		return fmt.Errorf("charge_timeout_hours %d must be at least 1", c.ChargeTimeoutHours)
+	}
+	if c.DischargeTimeoutHours < 1 {
+		return fmt.Errorf("discharge_timeout_hours %d must be at least 1", c.DischargeTimeoutHours)
 	}
 	return nil
 }

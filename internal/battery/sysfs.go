@@ -97,6 +97,10 @@ func (s *Sysfs) Read() (Reading, error) {
 		{"energy_full", &r.EnergyFullUWh},
 		{"energy_full_design", &r.EnergyFullDesignUWh},
 		{"voltage_now", &r.VoltageNowUV},
+		// power_now is the discharge controller's feedback signal. Some packs
+		// expose current_now instead; deriving power from current_now*voltage_now
+		// for those is a portability TODO (this fleet's packs report power_now).
+		{"power_now", &r.PowerNowUW},
 	} {
 		v, err := optInt(s.batPath(f.attr))
 		if err != nil {

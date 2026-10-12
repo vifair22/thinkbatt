@@ -23,12 +23,33 @@ import (
 	"git.airies.net/vifair22/thinkbatt/internal/state"
 )
 
+// DischargeAssist accelerates the force-discharge legs by holding the pack at a
+// target power (see internal/load): idle force-discharge is too slow to reach
+// the floor in a sane time. A nil assist, or a zero DischargeCRate, leaves the
+// discharge at the idle draw. Start begins holding the target for ctx; Stop ends
+// it and is safe to call when not started. load.Assist satisfies this.
+type DischargeAssist interface {
+	Start(ctx context.Context, targetWatts float64) error
+	Stop()
+}
+
 // Params configures a run. Timeouts bound each waiting phase so a stuck pack
 // cannot hang the engine forever.
 type Params struct {
 	BandStart int
 	BandStop  int
 	Floor     int // discharge target, percent
+
+	// RestAtFull and RestAtFloor relax the pack in place at each turnaround so
+	// the gauge can take an open-circuit-voltage reading and relearn capacity. A
+	// zero duration skips that rest.
+	RestAtFull  time.Duration
+	RestAtFloor time.Duration
+
+	// DischargeCRate is the discharge rate as a fraction of design capacity per
+	// hour (0.2 = C/5). The engine turns it into a watt target for the assist
+	// using the pack's design capacity. Zero disables the assist (idle discharge).
+	DischargeCRate float64
 
 	PollInterval     time.Duration
 	ChargeTimeout    time.Duration
@@ -70,10 +91,12 @@ type Engine struct {
 	clock  Clock
 	log    *slog.Logger
 	params Params
+	assist DischargeAssist
 }
 
 // New builds an Engine. A nil clock uses the real clock; a nil logger discards.
-func New(bat battery.Battery, clock Clock, log *slog.Logger, p Params) *Engine {
+// A nil assist runs the discharge legs at the idle draw.
+func New(bat battery.Battery, clock Clock, log *slog.Logger, p Params, assist DischargeAssist) *Engine {
 	if clock == nil {
 		clock = RealClock{}
 	}
@@ -81,7 +104,7 @@ func New(bat battery.Battery, clock Clock, log *slog.Logger, p Params) *Engine {
 		log = slog.New(slog.DiscardHandler)
 	}
 	p.withDefaults()
-	return &Engine{bat: bat, clock: clock, log: log, params: p}
+	return &Engine{bat: bat, clock: clock, log: log, params: p, assist: assist}
 }
 
 // Result summarises a run for the state file and logs.
@@ -111,10 +134,22 @@ func (e *Engine) Run(ctx context.Context) (res Result, err error) {
 	res.EnergyFullBeforeUWh = before.EnergyFullUWh
 	res.CycleCount = before.CycleCount
 
+	// targetW is the discharge power the assist holds, derived from the C-rate
+	// and the pack's design capacity. Zero (no C-rate, no design, or no assist)
+	// means the discharge runs at the idle draw.
+	targetW := 0.0
+	if e.params.DischargeCRate > 0 && before.EnergyFullDesignUWh > 0 {
+		targetW = e.params.DischargeCRate * float64(before.EnergyFullDesignUWh) / 1e6
+	}
+
 	// The safety net: whatever happens below, leave the pack safe. Uses a
 	// background context so it still writes sysfs after ctx cancellation; the
-	// writes are immediate and do not block.
+	// writes are immediate and do not block. Stop the load first so nothing
+	// keeps discharging while the band is restored.
 	defer func() {
+		if e.assist != nil {
+			e.assist.Stop()
+		}
 		if rerr := e.restore(); rerr != nil {
 			e.log.Error("restore to resting band failed", "err", rerr)
 			if err == nil && res.Outcome == state.OutcomeOK {
@@ -136,7 +171,7 @@ func (e *Engine) Run(ctx context.Context) (res Result, err error) {
 		return res, nil
 	}
 
-	phaseErr := e.cycle(ctx)
+	phaseErr := e.cycle(ctx, targetW)
 	switch {
 	case phaseErr == nil:
 		res.Outcome, res.Reason = state.OutcomeOK, "learning cycle complete"
@@ -158,8 +193,11 @@ func (e *Engine) Run(ctx context.Context) (res Result, err error) {
 	return res, nil
 }
 
-// cycle is the charge -> discharge -> recharge -> drain-to-band sequence.
-func (e *Engine) cycle(ctx context.Context) error {
+// cycle is the full learning sequence: charge -> rest -> discharge -> rest ->
+// recharge -> drain-to-band. The two rests let the gauge relax and take the
+// open-circuit-voltage readings it needs to relearn capacity; the discharge
+// legs are held at targetW by the assist when one is configured.
+func (e *Engine) cycle(ctx context.Context, targetW float64) error {
 	p := e.params
 
 	e.log.Info("calibration: charging to full")
@@ -173,11 +211,22 @@ func (e *Engine) cycle(ctx context.Context) error {
 		return err
 	}
 
-	e.log.Info("calibration: discharging to floor", "floor", p.Floor)
+	if err := e.rest(ctx, "full", p.RestAtFull); err != nil {
+		return err
+	}
+
+	e.log.Info("calibration: discharging to floor", "floor", p.Floor, "target_w", targetW)
 	if err := e.bat.SetBehaviour(battery.BehaviourForceDischarge); err != nil {
 		return fmt.Errorf("set force-discharge: %w", err)
 	}
-	if err := e.waitFloor(ctx, p.Floor, p.DischargeTimeout); err != nil {
+	stopAssist := e.startAssist(ctx, targetW)
+	errFloor := e.waitFloor(ctx, p.Floor, p.DischargeTimeout)
+	stopAssist()
+	if errFloor != nil {
+		return errFloor
+	}
+
+	if err := e.rest(ctx, "floor", p.RestAtFloor); err != nil {
 		return err
 	}
 
@@ -190,10 +239,60 @@ func (e *Engine) cycle(ctx context.Context) error {
 	}
 
 	e.log.Info("calibration: draining to resting band", "stop", p.BandStop)
-	if err := e.drainToBand(ctx, p.BandStop, p.DischargeTimeout); err != nil {
+	if err := e.drainToBand(ctx, p.BandStop, targetW, p.DischargeTimeout); err != nil {
 		return err
 	}
 	return nil
+}
+
+// rest relaxes the pack in place so the gauge can take an open-circuit-voltage
+// reading: inhibit-charge holds the pack neither charging nor discharging on AC.
+// A zero duration skips the rest; a machine without inhibit-charge skips it with
+// a warning (the relearn is weaker but the cycle still runs). AC loss aborts,
+// since without AC the pack would drain through the rest.
+func (e *Engine) rest(ctx context.Context, where string, dur time.Duration) error {
+	if dur <= 0 {
+		return nil
+	}
+	supported, err := e.bat.Supported()
+	if err != nil {
+		return fmt.Errorf("rest at %s: probe behaviours: %w", where, err)
+	}
+	if !battery.Supports(supported, battery.BehaviourInhibitCharge) {
+		e.log.Warn("inhibit-charge unsupported; skipping relaxation rest (weaker relearn)", "at", where)
+		return nil
+	}
+	e.log.Info("calibration: resting", "at", where, "for", dur)
+	if err := e.bat.SetBehaviour(battery.BehaviourInhibitCharge); err != nil {
+		return fmt.Errorf("set inhibit-charge for %s rest: %w", where, err)
+	}
+	deadline := e.clock.Now().Add(dur)
+	for e.clock.Now().Before(deadline) {
+		r, err := e.bat.Read()
+		if err != nil {
+			return fmt.Errorf("rest at %s: read: %w", where, err)
+		}
+		if !r.ACOnline {
+			return errAbort{"AC lost during " + where + " rest"}
+		}
+		if err := e.clock.Sleep(ctx, e.params.PollInterval); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// startAssist begins the controlled discharge load if an assist is configured
+// and a target is set. It always returns a stop func that is safe to call.
+func (e *Engine) startAssist(ctx context.Context, targetW float64) func() {
+	if e.assist == nil || targetW <= 0 {
+		return func() {}
+	}
+	if err := e.assist.Start(ctx, targetW); err != nil {
+		e.log.Warn("discharge assist failed to start; continuing at idle draw", "err", err)
+		return func() {}
+	}
+	return e.assist.Stop
 }
 
 // waitFull polls until the pack reports full. It aborts if AC is lost, since a
@@ -230,7 +329,7 @@ func (e *Engine) waitFloor(ctx context.Context, floor int, timeout time.Duration
 // drainToBand force-discharges from full back down to the resting ceiling, so
 // the pack does not coast at a high charge for days after the cycle. If it is
 // already at or below the ceiling there is nothing to do.
-func (e *Engine) drainToBand(ctx context.Context, stop int, timeout time.Duration) error {
+func (e *Engine) drainToBand(ctx context.Context, stop int, targetW float64, timeout time.Duration) error {
 	r, err := e.bat.Read()
 	if err != nil {
 		return fmt.Errorf("read before drain: %w", err)
@@ -241,6 +340,8 @@ func (e *Engine) drainToBand(ctx context.Context, stop int, timeout time.Duratio
 	if err := e.bat.SetBehaviour(battery.BehaviourForceDischarge); err != nil {
 		return fmt.Errorf("set force-discharge for drain: %w", err)
 	}
+	stopAssist := e.startAssist(ctx, targetW)
+	defer stopAssist()
 	return e.poll(ctx, timeout, "drain", func(r battery.Reading) (bool, error) {
 		return r.Capacity <= stop, nil
 	})

@@ -13,10 +13,15 @@ sees either endpoint, so its FCC estimate drifts: a gauge can report a full
 charge well above the pack's design capacity, which is physically impossible and
 makes every percentage and time-remaining figure untrustworthy.
 
-The fix is a learning cycle: charge to full, discharge to a low floor, charge to
-full again. That gives the gauge the endpoints it needs to re-anchor FCC.
-thinkbatt automates this using the firmware's `force-discharge`, so the pack is
-driven down on AC in a few hours rather than coasting at a high charge for weeks.
+The fix is a learning cycle: charge to full, rest, discharge to a low floor,
+rest, charge to full again. The gauges in these packs (TI impedance-track class)
+relearn FCC from two relaxed open-circuit-voltage readings, one at full and one
+near empty, so the cycle rests the pack at each turnaround (`inhibit-charge`,
+neither charging nor discharging on AC) long enough for the voltage to settle;
+without those rests the learned capacity does not move. thinkbatt drives the
+discharge with the firmware's `force-discharge`, held at a configured C-rate by
+a controlled CPU load, so the pack comes down on AC in a bounded time rather than
+coasting at a high charge for weeks or crawling at the idle draw.
 
 ## Capability model
 
@@ -47,12 +52,21 @@ back to the config; edit `/etc/thinkbatt/thinkbatt.ini` to make it permanent.
 
 When due, the daemon runs these phases, each bounded by a timeout:
 
-1. **Charge to full** - thresholds set to 99/100, wait for full.
-2. **Discharge to the floor** - `force-discharge`, wait until charge <= `calib_floor`.
-3. **Recharge to full** - back to auto at 99/100, wait for full. This closes the
-   learning cycle so the gauge finalizes FCC.
-4. **Return to the band** - force-discharge back down to `band_stop`, then
+1. **Charge to full** - thresholds set to 99/100, wait for full (a pack already
+   near full counts as done once the charger stops, so it does not stall).
+2. **Rest at full** - `inhibit-charge` for `rest_at_full_minutes`, so the pack
+   relaxes and the gauge takes its full-charge OCV reading.
+3. **Discharge to the floor** - `force-discharge` held at `discharge_c_rate` by
+   the controlled load, wait until charge <= `calib_floor`.
+4. **Rest at the floor** - `inhibit-charge` for `rest_at_floor_minutes`, so the
+   gauge takes its near-empty OCV reading. Together with step 2 this is what
+   lets the gauge relearn FCC.
+5. **Recharge to full** - back to auto at 99/100, wait for full.
+6. **Return to the band** - force-discharge back down to `band_stop`, then
    restore the band and auto.
+
+A machine that lacks `inhibit-charge` skips the rests (logged); the cycle still
+runs but the relearn is weaker.
 
 Safety invariants:
 
@@ -68,8 +82,11 @@ Safety invariants:
   lid does not derail a run.
 - **One at a time.** A second calibration request while one is running is refused.
 
-A full cycle is roughly 6-8 hours of wall time (two full charges plus a deep
-discharge at laptop power). Keep the machine on AC.
+A full cycle is roughly 8-11 hours of wall time at the default C/5 discharge:
+two full charges, a deep discharge, and the two rests. The controlled discharge
+is what keeps it bounded; `discharge_c_rate = 0` reverts to the idle draw, where
+the discharge alone can exceed 12 hours (raise `discharge_timeout_hours` to
+match). Keep the machine on AC throughout.
 
 ## When it runs
 
@@ -96,6 +113,11 @@ for every key and its default. A missing file means all defaults.
 | `calib_every_cycles` | 30 | cycles between calibrations |
 | `calib_every_days` | 90 | days between calibrations |
 | `calib_enabled` | true | automatic calibration on/off (manual `--now` still works) |
+| `rest_at_full_minutes` | 60 | relaxation at full for the gauge's OCV reading (0 skips) |
+| `rest_at_floor_minutes` | 60 | relaxation at the floor for the gauge's OCV reading (0 skips) |
+| `discharge_c_rate` | 0.2 | discharge rate as a fraction of design capacity/hour (0 = idle draw) |
+| `charge_timeout_hours` | 5 | bound on each charge phase |
+| `discharge_timeout_hours` | 8 | bound on each discharge phase |
 
 ## Verifying a calibration worked
 

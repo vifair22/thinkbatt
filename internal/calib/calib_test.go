@@ -54,7 +54,7 @@ func stdParams() Params {
 func TestFullCycleRelearn(t *testing.T) {
 	sim := fullSetSim(79)
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
-	e := New(sim, clk, nil, stdParams())
+	e := New(sim, clk, nil, stdParams(), nil)
 
 	res, err := e.Run(context.Background())
 	if err != nil {
@@ -75,7 +75,7 @@ func TestFullCycleRelearn(t *testing.T) {
 func TestAbortNoAC(t *testing.T) {
 	sim := battery.NewSim(battery.SimConfig{Capacity: 79, Start: 20, Stop: 25, HasThresholds: true, ACOnline: false})
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
-	res, err := New(sim, clk, nil, stdParams()).Run(context.Background())
+	res, err := New(sim, clk, nil, stdParams(), nil).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestAbortForceDischargeUnsupported(t *testing.T) {
 		Supported: []battery.Behaviour{battery.BehaviourAuto},
 	})
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
-	res, err := New(sim, clk, nil, stdParams()).Run(context.Background())
+	res, err := New(sim, clk, nil, stdParams(), nil).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestAbortACLostDuringDischarge(t *testing.T) {
 			sim.SetAC(false)
 		}
 	}
-	res, err := New(sim, clk, nil, stdParams()).Run(context.Background())
+	res, err := New(sim, clk, nil, stdParams(), nil).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestCancelRestores(t *testing.T) {
 			cancel()
 		}
 	}
-	res, err := New(sim, clk, nil, stdParams()).Run(ctx)
+	res, err := New(sim, clk, nil, stdParams(), nil).Run(ctx)
 	cancel()
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -149,7 +149,7 @@ func TestChargeTimeout(t *testing.T) {
 	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
 	p := stdParams()
 	p.ChargeTimeout = time.Minute // far too short to reach full
-	res, err := New(sim, clk, nil, p).Run(context.Background())
+	res, err := New(sim, clk, nil, p, nil).Run(context.Background())
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -179,6 +179,118 @@ func TestChargeComplete(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeAssist records how the engine drove the discharge load. Run drives the
+// engine synchronously under the fake clock, so no locking is needed.
+type fakeAssist struct {
+	started    int
+	stopped    int
+	lastTarget float64
+	startErr   error
+}
+
+func (a *fakeAssist) Start(_ context.Context, target float64) error {
+	a.started++
+	a.lastTarget = target
+	return a.startErr
+}
+
+func (a *fakeAssist) Stop() { a.stopped++ }
+
+func restParams() Params {
+	p := stdParams()
+	p.RestAtFull = time.Hour
+	p.RestAtFloor = time.Hour
+	p.DischargeCRate = 0.2 // C/5; on a 94 Wh design pack that is 18.8 W
+	return p
+}
+
+func TestFullCycleWithRestsAndAssist(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	seen := map[battery.Behaviour]bool{}
+	clk.after = func() {
+		b, _ := sim.Behaviour()
+		seen[b] = true
+	}
+	fa := &fakeAssist{}
+	res, err := New(sim, clk, nil, restParams(), fa).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != state.OutcomeOK {
+		t.Fatalf("outcome = %q (%s), want ok", res.Outcome, res.Reason)
+	}
+	if res.EnergyFullAfterUWh != 94_000_000 {
+		t.Errorf("FCC after = %d, want relearned 94M", res.EnergyFullAfterUWh)
+	}
+	if !seen[battery.BehaviourInhibitCharge] {
+		t.Error("expected an inhibit-charge rest during the cycle")
+	}
+	if fa.started == 0 || fa.stopped < fa.started {
+		t.Errorf("assist started %d / stopped %d, want started >=1 and stopped >= started", fa.started, fa.stopped)
+	}
+	if fa.lastTarget < 18.0 || fa.lastTarget > 19.6 {
+		t.Errorf("assist target = %.2f W, want ~18.8 (C/5 of 94 Wh)", fa.lastTarget)
+	}
+	assertResting(t, sim, 75, 80)
+}
+
+func TestDischargeAssistStartErrorContinues(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	fa := &fakeAssist{startErr: errAbort{"no load available"}}
+	res, err := New(sim, clk, nil, restParams(), fa).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// A failed assist start is logged and the discharge proceeds at idle draw,
+	// so the cycle still completes.
+	if res.Outcome != state.OutcomeOK {
+		t.Fatalf("outcome = %q (%s), want ok", res.Outcome, res.Reason)
+	}
+	assertResting(t, sim, 75, 80)
+}
+
+func TestAbortACLostDuringRest(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	clk.after = func() {
+		if b, _ := sim.Behaviour(); b == battery.BehaviourInhibitCharge {
+			sim.SetAC(false)
+		}
+	}
+	res, err := New(sim, clk, nil, restParams(), &fakeAssist{}).Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != state.OutcomeAborted || !strings.Contains(res.Reason, "AC lost during full rest") {
+		t.Errorf("outcome = %q (%s), want aborted/AC lost during full rest", res.Outcome, res.Reason)
+	}
+	assertResting(t, sim, 75, 80)
+}
+
+func TestCancelDuringRest(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancelled := false
+	clk.after = func() {
+		if b, _ := sim.Behaviour(); b == battery.BehaviourInhibitCharge && !cancelled {
+			cancelled = true
+			cancel()
+		}
+	}
+	res, err := New(sim, clk, nil, restParams(), &fakeAssist{}).Run(ctx)
+	cancel()
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != state.OutcomeAborted || !strings.Contains(res.Reason, "cancel") {
+		t.Errorf("outcome = %q (%s), want aborted/cancelled", res.Outcome, res.Reason)
+	}
+	assertResting(t, sim, 75, 80)
 }
 
 func assertResting(t *testing.T, sim *battery.Sim, start, stop int) {
