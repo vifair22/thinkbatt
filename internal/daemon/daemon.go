@@ -195,17 +195,23 @@ func (d *Daemon) run(ctx context.Context, cancel context.CancelFunc, params cali
 			"energy_full_before_uwh", rec.EnergyFullBeforeUWh, "energy_full_after_uwh", rec.EnergyFullAfterUWh)
 	}
 
+	// Record and persist before clearing the running flag, so that once a run
+	// is observable as finished its result is already durable on disk (and the
+	// control socket cannot report "not running" with no saved outcome yet).
 	d.mu.Lock()
 	d.st.LastCalibration = &rec
 	st := d.st
-	d.running = false
-	d.cancel = nil
-	d.runReason = ""
 	d.mu.Unlock()
 
 	if err := state.Save(d.statePath, st); err != nil {
 		d.log.Error("save state failed", "err", err)
 	}
+
+	d.mu.Lock()
+	d.running = false
+	d.cancel = nil
+	d.runReason = ""
+	d.mu.Unlock()
 }
 
 // Cancel stops a running calibration; the engine restores the resting band as
