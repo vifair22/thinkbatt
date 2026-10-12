@@ -218,7 +218,12 @@ func NewAssist(workers int, measure func() (float64, error), clock Clock, log *s
 		clock = RealClock{}
 	}
 	return &Assist{
-		ctrl:    Controller{Kp: 0.02, Ki: 0.0008, MinDuty: 0, MaxDuty: 1, Interval: 10 * time.Second},
+		// Ki trimmed from 0.0008 after the first T430 run showed a ~70 s limit
+		// cycle (+/-2 W around target): the integral term was over-correcting
+		// against the loop's deadtime. Halved for damping; still enough integral
+		// action to zero the steady-state bias. Revisit with a second machine's
+		// data before trimming further.
+		ctrl:    Controller{Kp: 0.02, Ki: 0.0004, MinDuty: 0, MaxDuty: 1, Interval: 10 * time.Second},
 		load:    NewCPULoad(workers),
 		measure: measure,
 		clock:   clock,
