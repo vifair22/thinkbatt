@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -35,6 +34,15 @@ func TestInhibitor(t *testing.T) {
 	}
 }
 
+// oneSet is a battery.Set over a single in-memory pack for the wiring test.
+type oneSet struct {
+	name string
+	bat  battery.Battery
+}
+
+func (s oneSet) List() ([]string, error)     { return []string{s.name}, nil }
+func (s oneSet) Open(string) battery.Battery { return s.bat }
+
 func TestServeWiring(t *testing.T) {
 	dir := t.TempDir()
 	// Band-capable but not calibrate-capable, so the startup due-check does not
@@ -50,18 +58,19 @@ func TestServeWiring(t *testing.T) {
 	go func() {
 		errc <- serve(ctx, serveOpts{
 			log:        slog.New(slog.DiscardHandler),
-			cfg:        config.Default(),
-			bat:        sim,
+			cfgFile:    config.File{Global: config.Default()},
+			set:        oneSet{name: "BAT0", bat: sim},
 			sockPath:   sock,
 			statePath:  filepath.Join(dir, "state.json"),
 			checkEvery: time.Hour,
 		})
 	}()
 
-	// Once the socket exists, startup wiring (including AssertBand) has run.
+	// The startup maintenance pass asserts the resting band; poll for it, since
+	// it runs concurrently with the control socket coming up.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, err := os.Stat(sock); err == nil {
+		if start, stop, err := sim.Thresholds(); err == nil && start == 75 && stop == 80 {
 			break
 		}
 		time.Sleep(2 * time.Millisecond)

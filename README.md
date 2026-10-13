@@ -14,6 +14,13 @@ can do and does only that. A coreboot ThinkPad that exposes `force-discharge`
 with only charge thresholds gets band management; a machine with neither is left
 alone.
 
+It manages **every** battery present, not just the internal one. Packs are
+discovered automatically and tracked independently - a docked or bay pack (BAT1
+beside BAT0) is banded as soon as it appears and dropped when pulled, each pack
+keeps its own calibration history, and a `[BAT1]` section in the config gives a
+pack its own band or disables its automatic calibration. One calibration runs at
+a time, against a chosen pack.
+
 Status: pre-1.0, developed on `master`. Calibration is validated against a
 software battery simulator; the first hardware learning cycle is supervised (see
 the Manual).
@@ -64,8 +71,13 @@ both write the thresholds. See the Manual.
 ## Usage
 
 ```sh
-thinkbatt status              # charge, band, capabilities, last calibration
-thinkbatt calibrate --now     # run a learning cycle now
-thinkbatt cancel              # stop a running calibration (restores the band)
-thinkbatt band 75 80          # set the resting band at runtime
+thinkbatt status                         # every pack: charge, band, caps, last calibration
+thinkbatt calibrate --now                # run a learning cycle now (one pack only)
+thinkbatt calibrate --battery BAT1 --now # ...name the pack when more than one is present
+thinkbatt cancel                         # stop the running calibration (restores the band)
+thinkbatt band 75 80                     # set the resting band at runtime (all packs)
+thinkbatt band --battery BAT1 50 60      # ...or just one pack
 ```
+
+With more than one pack present, `calibrate` requires `--battery` rather than
+guessing which pack to drain.

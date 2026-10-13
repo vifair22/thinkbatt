@@ -143,7 +143,7 @@ func (s *Server) dispatch(req Request) Response {
 
 	case CmdCalibrate:
 		now := req.Args["now"] == "true"
-		if err := s.h.Calibrate(now); err != nil {
+		if err := s.h.Calibrate(req.Args["battery"], now); err != nil {
 			return errResp(err)
 		}
 		return Response{OK: true}
@@ -163,7 +163,7 @@ func (s *Server) dispatch(req Request) Response {
 		if err != nil {
 			return errResp(errors.New("band: stop is not an integer"))
 		}
-		if err := s.h.SetBand(start, stop); err != nil {
+		if err := s.h.SetBand(req.Args["battery"], start, stop); err != nil {
 			return errResp(err)
 		}
 		return Response{OK: true}

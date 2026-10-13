@@ -35,8 +35,9 @@ type Response struct {
 	Data  json.RawMessage `json:"data,omitempty"`
 }
 
-// StatusInfo is the payload of a status response.
-type StatusInfo struct {
+// PackStatus is the state of one battery pack.
+type PackStatus struct {
+	Name                string             `json:"name"`
 	Capacity            int                `json:"capacity"`
 	Status              string             `json:"status"`
 	BehaviourActive     string             `json:"behaviour_active"`
@@ -50,13 +51,20 @@ type StatusInfo struct {
 	LastCalibration     *state.Calibration `json:"last_calibration,omitempty"`
 }
 
-// Handler is the daemon-side behaviour behind the socket.
+// StatusInfo is the payload of a status response: one entry per present pack.
+type StatusInfo struct {
+	Packs []PackStatus `json:"packs"`
+}
+
+// Handler is the daemon-side behaviour behind the socket. The battery argument
+// names a pack; an empty name means "the only pack" for calibrate (an error
+// when several are present) and "every band-capable pack" for band.
 type Handler interface {
 	Status() (StatusInfo, error)
-	// Calibrate requests a calibration run; now bypasses the due-check.
-	Calibrate(now bool) error
+	// Calibrate requests a calibration run on a pack; now bypasses the due-check.
+	Calibrate(battery string, now bool) error
 	Cancel() error
-	SetBand(start, stop int) error
+	SetBand(battery string, start, stop int) error
 }
 
 // Client dials the daemon socket for one command.

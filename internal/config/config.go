@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -49,25 +50,60 @@ func Default() Config {
 	}
 }
 
+// File is a parsed config: the global policy plus any per-pack overrides. A
+// machine with one battery never needs a section; a second pack that wants a
+// different band or no automatic calibration gets a "[BATx]" section whose keys
+// override the global ones for that pack only. Resolve a pack's effective
+// policy with For.
+type File struct {
+	Global    Config
+	overrides map[string][]kv // pack name -> raw key/vals from its [section]
+}
+
+type kv struct{ key, val string }
+
+// socketGroupKey is global-only: the control socket belongs to the daemon, not
+// to any one pack, so it is rejected inside a pack section.
+const socketGroupKey = "socket_group"
+
 // Load reads the config at path. A path that does not exist yields the defaults
-// unchanged, which is the normal first-boot case.
+// unchanged, which is the normal first-boot case. It returns only the global
+// policy; use LoadFile when per-pack overrides matter.
 func Load(path string) (Config, error) {
+	f, err := LoadFile(path)
+	return f.Global, err
+}
+
+// LoadFile reads the config at path, sections and all. A nonexistent path
+// yields the defaults, the normal first-boot case.
+func LoadFile(path string) (File, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Default(), nil
+			return File{Global: Default()}, nil
 		}
-		return Config{}, fmt.Errorf("open %s: %w", path, err)
+		return File{}, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
-	return Parse(f)
+	return ParseFile(f)
 }
 
-// Parse reads INI key=value lines over the defaults and validates the result.
-// Blank lines and lines beginning with '#' or ';' are ignored, as is a leading
-// [section] header (the config is flat, but a header is tolerated).
+// Parse reads global INI key=value lines over the defaults and validates the
+// result, ignoring any per-pack sections. It is the flat view of ParseFile.
 func Parse(r io.Reader) (Config, error) {
-	c := Default()
+	f, err := ParseFile(r)
+	return f.Global, err
+}
+
+// ParseFile reads an INI body into a File. Lines before any section header, or
+// under a "[global]" header, set the global policy; lines under a "[BATx]"
+// header override that policy for pack BATx. Blank lines and lines beginning
+// with '#' or ';' are ignored. Every override is resolved and validated here so
+// a bad section fails at load, not at the first rescan.
+func ParseFile(r io.Reader) (File, error) {
+	global := Default()
+	overrides := map[string][]kv{}
+	section := "" // "" is the global section
 	sc := bufio.NewScanner(r)
 	ln := 0
 	for sc.Scan() {
@@ -77,25 +113,73 @@ func Parse(r io.Reader) (Config, error) {
 			continue
 		}
 		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			section = strings.TrimSpace(line[1 : len(line)-1])
+			if section == "" {
+				return File{}, fmt.Errorf("line %d: empty section header", ln)
+			}
+			if strings.EqualFold(section, "global") {
+				section = ""
+			}
 			continue
 		}
 		key, val, ok := strings.Cut(line, "=")
 		if !ok {
-			return Config{}, fmt.Errorf("line %d: not key=value: %q", ln, line)
+			return File{}, fmt.Errorf("line %d: not key=value: %q", ln, line)
 		}
 		key = strings.TrimSpace(key)
 		val = strings.TrimSpace(val)
-		if err := c.set(key, val); err != nil {
-			return Config{}, fmt.Errorf("line %d: %w", ln, err)
+		if section == "" {
+			if err := global.set(key, val); err != nil {
+				return File{}, fmt.Errorf("line %d: %w", ln, err)
+			}
+			continue
 		}
+		if key == socketGroupKey {
+			return File{}, fmt.Errorf("line %d: %s is global-only, not valid in [%s]", ln, socketGroupKey, section)
+		}
+		overrides[section] = append(overrides[section], kv{key, val})
 	}
 	if err := sc.Err(); err != nil {
-		return Config{}, fmt.Errorf("read config: %w", err)
+		return File{}, fmt.Errorf("read config: %w", err)
+	}
+	if err := global.Validate(); err != nil {
+		return File{}, err
+	}
+	f := File{Global: global, overrides: overrides}
+	for name := range overrides {
+		if _, err := f.For(name); err != nil {
+			return File{}, fmt.Errorf("section [%s]: %w", name, err)
+		}
+	}
+	return f, nil
+}
+
+// For resolves the effective policy for a pack: the global policy with that
+// pack's section applied over it. A pack with no section gets the global policy
+// unchanged.
+func (f File) For(pack string) (Config, error) {
+	c := f.Global
+	for _, o := range f.overrides[pack] {
+		if err := c.set(o.key, o.val); err != nil {
+			return Config{}, err
+		}
 	}
 	if err := c.Validate(); err != nil {
 		return Config{}, err
 	}
 	return c, nil
+}
+
+// OverriddenPacks returns the pack names that carry an explicit section, so the
+// daemon can log which packs deviate from the global policy. Discovery is still
+// automatic; a section only tunes a pack, it does not declare one.
+func (f File) OverriddenPacks() []string {
+	names := make([]string, 0, len(f.overrides))
+	for name := range f.overrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 func (c *Config) set(key, val string) error {

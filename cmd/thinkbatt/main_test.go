@@ -18,8 +18,8 @@ type stubHandler struct {
 }
 
 func (h *stubHandler) Status() (control.StatusInfo, error) {
-	return control.StatusInfo{
-		Capacity: 79, Status: "Not charging", BehaviourActive: "auto",
+	return control.StatusInfo{Packs: []control.PackStatus{{
+		Name: "BAT0", Capacity: 79, Status: "Not charging", BehaviourActive: "auto",
 		BandStart: 75, BandStop: 80, HasThresholds: true,
 		EnergyFullUWh: 112_700_000, EnergyFullDesignUWh: 94_000_000,
 		CapsSummary: "band=yes calibrate=yes",
@@ -28,11 +28,11 @@ func (h *stubHandler) Status() (control.StatusInfo, error) {
 			Outcome:    state.OutcomeOK, Reason: "learning cycle complete",
 			EnergyFullBeforeUWh: 112_700_000, EnergyFullAfterUWh: 94_000_000,
 		},
-	}, nil
+	}}}, nil
 }
-func (h *stubHandler) Calibrate(bool) error { h.calibCalled = true; return nil }
-func (h *stubHandler) Cancel() error        { return nil }
-func (h *stubHandler) SetBand(start, stop int) error {
+func (h *stubHandler) Calibrate(string, bool) error { h.calibCalled = true; return nil }
+func (h *stubHandler) Cancel() error                { return nil }
+func (h *stubHandler) SetBand(battery string, start, stop int) error {
 	h.bandStart, h.bandStop = start, stop
 	return nil
 }

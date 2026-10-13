@@ -18,7 +18,6 @@ import (
 
 	"git.airies.net/vifair22/thinkbatt/internal/battery"
 	"git.airies.net/vifair22/thinkbatt/internal/calib"
-	"git.airies.net/vifair22/thinkbatt/internal/caps"
 	"git.airies.net/vifair22/thinkbatt/internal/config"
 	"git.airies.net/vifair22/thinkbatt/internal/control"
 	"git.airies.net/vifair22/thinkbatt/internal/daemon"
@@ -45,8 +44,7 @@ func runArgs(args []string) error {
 		sockPath    = fs.String("socket", "/run/thinkbattd/control.sock", "control socket path")
 		statePath   = fs.String("state", "/var/lib/thinkbattd/state.json", "state file path")
 		batRoot     = fs.String("sysfs-root", battery.DefaultRoot, "power_supply sysfs root")
-		batName     = fs.String("battery", "BAT0", "battery name under the sysfs root")
-		checkEvery  = fs.Duration("check-interval", time.Hour, "how often to re-check whether calibration is due")
+		maintEvery  = fs.Duration("maintain-interval", 2*time.Minute, "how often to rescan packs, re-assert bands, and check whether a calibration is due")
 		showVersion = fs.Bool("version", false, "print version and exit")
 	)
 	if err := fs.Parse(args); err != nil {
@@ -60,7 +58,7 @@ func runArgs(args []string) error {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	cfg, err := config.Load(*cfgPath)
+	cfgFile, err := config.LoadFile(*cfgPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -70,19 +68,19 @@ func runArgs(args []string) error {
 
 	return serve(ctx, serveOpts{
 		log:        log,
-		cfg:        cfg,
-		bat:        battery.NewSysfs(*batRoot, *batName),
+		cfgFile:    cfgFile,
+		set:        battery.NewSysfsSet(*batRoot),
 		inhibitor:  sdInhibitor{log: log},
 		sockPath:   *sockPath,
 		statePath:  *statePath,
-		checkEvery: *checkEvery,
+		checkEvery: *maintEvery,
 	})
 }
 
 type serveOpts struct {
 	log        *slog.Logger
-	cfg        config.Config
-	bat        battery.Battery
+	cfgFile    config.File
+	set        battery.Set
 	inhibitor  daemon.Inhibitor
 	sockPath   string
 	statePath  string
@@ -91,20 +89,11 @@ type serveOpts struct {
 
 // serve wires the daemon to the hardware and the control socket and runs until
 // ctx is cancelled. It is separate from flag parsing so a test can drive it
-// with a simulated battery and temp paths.
+// with simulated packs and temp paths.
 func serve(ctx context.Context, o serveOpts) error {
-	profile, err := caps.Detect(o.bat)
-	if err != nil {
-		return fmt.Errorf("detect capabilities: %w", err)
-	}
-	o.log.Info("thinkbattd starting", "version", version, "caps", profile.Summary(),
-		"band", fmt.Sprintf("%d/%d", o.cfg.BandStart, o.cfg.BandStop))
-	if !profile.CanManageBand() {
-		o.log.Warn("machine has no charge thresholds; band management disabled")
-	}
-	if !profile.CanCalibrate() {
-		o.log.Warn("machine cannot force-discharge; automatic calibration disabled")
-	}
+	o.log.Info("thinkbattd starting", "version", version,
+		"band", fmt.Sprintf("%d/%d", o.cfgFile.Global.BandStart, o.cfgFile.Global.BandStop),
+		"tuned_packs", o.cfgFile.OverriddenPacks())
 
 	for _, dir := range []string{filepath.Dir(o.sockPath), filepath.Dir(o.statePath)} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -112,13 +101,11 @@ func serve(ctx context.Context, o serveOpts) error {
 		}
 	}
 
-	// The discharge assist holds the force-discharge legs at the configured
-	// C-rate by driving a controlled CPU load, reading the pack's power_now as
-	// feedback. Only machines that can force-discharge calibrate, so only they
-	// need it.
-	var assist calib.DischargeAssist
-	if profile.CanCalibrate() {
-		bat := o.bat
+	// assistFactory binds a discharge assist to whichever pack a calibration
+	// runs on: it holds the force-discharge leg at the configured C-rate with a
+	// controlled CPU load, reading that pack's power_now as feedback. The daemon
+	// calls it per run, only for packs that can force-discharge.
+	assistFactory := func(bat battery.Battery) calib.DischargeAssist {
 		measure := func() (float64, error) {
 			r, err := bat.Read()
 			if err != nil {
@@ -126,29 +113,22 @@ func serve(ctx context.Context, o serveOpts) error {
 			}
 			return float64(r.PowerNowUW) / 1e6, nil
 		}
-		assist = load.NewAssist(0, measure, load.RealClock{}, o.log)
+		return load.NewAssist(0, measure, load.RealClock{}, o.log)
 	}
 
 	d, err := daemon.New(daemon.Options{
-		Battery:   o.bat,
-		Profile:   profile,
-		Config:    o.cfg,
+		Set:       o.set,
+		File:      o.cfgFile,
 		StatePath: o.statePath,
 		Inhibitor: o.inhibitor,
-		Assist:    assist,
+		Assist:    assistFactory,
 		Logger:    o.log,
 	})
 	if err != nil {
 		return fmt.Errorf("init daemon: %w", err)
 	}
 
-	if profile.CanManageBand() {
-		if err := d.AssertBand(); err != nil {
-			o.log.Error("assert resting band at startup failed", "err", err)
-		}
-	}
-
-	srv := control.NewServer(o.sockPath, o.cfg.SocketGroup, d, o.log)
+	srv := control.NewServer(o.sockPath, o.cfgFile.Global.SocketGroup, d, o.log)
 	ticker := time.NewTicker(o.checkEvery)
 	defer ticker.Stop()
 

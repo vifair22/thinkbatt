@@ -47,6 +47,44 @@ given, so the band is safe across a daemon restart.
 
 `thinkbatt band <start> <stop>` changes the band at runtime. It is not written
 back to the config; edit `/etc/thinkbatt/thinkbatt.ini` to make it permanent.
+With more than one pack it sets every band-capable pack unless `--battery BATx`
+names one.
+
+## Multiple batteries
+
+thinkbatt manages every battery the machine presents, not just the internal
+pack. A ThinkPad with a bay or external pack shows it as `BAT1` beside the
+internal `BAT0`. Packs are **discovered automatically** and reconciled on each
+maintenance pass: a pack docked while the daemon runs is picked up and banded
+within one interval, and a pack pulled is dropped. Each pack is tracked
+independently - its own capability detection, its own resting band, and its own
+calibration history and due-schedule.
+
+Per-pack settings go in a section named for the pack; any key left out falls
+back to the global value. For example, to rest a small external pack in a lower
+band and never auto-calibrate it:
+
+```ini
+[BAT1]
+band_start = 50
+band_stop  = 60
+calib_enabled = false
+```
+
+`socket_group` is global and is not valid in a section. A section only tunes a
+pack; it does not declare one (discovery does that), so a section for a pack
+that is never present is simply inert.
+
+Calibration is still **one at a time** across the whole machine - the
+force-discharge assist and the sleep inhibitor are shared. With several packs
+present, `thinkbatt calibrate` requires `--battery BATx`; it will not pick a
+pack to deep-discharge on its own. Automatic (due-based) calibration walks the
+packs in name order and starts the first that is enabled, capable, and due.
+
+A note on hardware from the T480's external pack: `force-discharge` is accepted
+only on AC (on battery the firmware ignores it, and the kernel reports EIO), and
+on battery the EC alone decides which pack drains. Calibration runs on AC, where
+per-pack force-discharge drives the chosen pack, so neither limit affects it.
 
 ## The calibration cycle
 
@@ -94,8 +132,9 @@ A calibration is due when either `calib_every_cycles` charge cycles have passed
 since the last, or `calib_every_days` days have, whichever comes first (defaults
 30 cycles / 90 days). The cycle arm catches a heavily used pack; the time arm
 catches a pack that barely cycles. The daemon re-checks on a timer
-(`--check-interval`, default hourly). The first run after install, with no prior
-calibration recorded, is due immediately.
+(`--maintain-interval`, default 2 minutes), the same pass that rediscovers packs
+and re-asserts the bands. The first run after install, with no prior calibration
+recorded for a pack, is due immediately.
 
 Force a run regardless of the schedule with `thinkbatt calibrate --now`.
 `thinkbatt cancel` stops a run; the band is restored as it unwinds.
@@ -118,6 +157,10 @@ for every key and its default. A missing file means all defaults.
 | `discharge_c_rate` | 0.2 | discharge rate as a fraction of design capacity/hour (0 = idle draw) |
 | `charge_timeout_hours` | 5 | bound on each charge phase |
 | `discharge_timeout_hours` | 8 | bound on each discharge phase |
+
+Every key above is global by default. A `[BATx]` section overrides any of them
+for one pack (except `socket_group`, which is global-only); see Multiple
+batteries.
 
 ## Verifying a calibration worked
 

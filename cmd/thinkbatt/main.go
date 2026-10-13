@@ -75,38 +75,56 @@ func cmdStatus(c control.Client) error {
 }
 
 func printStatus(info control.StatusInfo) {
-	fmt.Printf("charge:      %d%% (%s)\n", info.Capacity, info.Status)
-	fmt.Printf("behaviour:   %s\n", info.BehaviourActive)
-	if info.HasThresholds {
-		fmt.Printf("band:        %d-%d%%\n", info.BandStart, info.BandStop)
+	if len(info.Packs) == 0 {
+		fmt.Println("no battery packs present")
+		return
+	}
+	for i, p := range info.Packs {
+		if i > 0 {
+			fmt.Println()
+		}
+		printPack(p)
+	}
+}
+
+func printPack(p control.PackStatus) {
+	fmt.Printf("%s\n", p.Name)
+	fmt.Printf("  charge:      %d%% (%s)\n", p.Capacity, p.Status)
+	fmt.Printf("  behaviour:   %s\n", p.BehaviourActive)
+	if p.HasThresholds {
+		fmt.Printf("  band:        %d-%d%%\n", p.BandStart, p.BandStop)
 	} else {
-		fmt.Printf("band:        unavailable (no charge thresholds)\n")
+		fmt.Printf("  band:        unavailable (no charge thresholds)\n")
 	}
-	if info.EnergyFullUWh > 0 {
-		fmt.Printf("gauge full:  %.1f Wh (design %.1f Wh)\n",
-			float64(info.EnergyFullUWh)/1e6, float64(info.EnergyFullDesignUWh)/1e6)
+	if p.EnergyFullUWh > 0 {
+		fmt.Printf("  gauge full:  %.1f Wh (design %.1f Wh)\n",
+			float64(p.EnergyFullUWh)/1e6, float64(p.EnergyFullDesignUWh)/1e6)
 	}
-	fmt.Printf("caps:        %s\n", info.CapsSummary)
-	fmt.Printf("calibrating: %t\n", info.CalibrationRunning)
-	if lc := info.LastCalibration; lc != nil {
-		fmt.Printf("last calib:  %s, %s (%s)\n",
+	fmt.Printf("  caps:        %s\n", p.CapsSummary)
+	fmt.Printf("  calibrating: %t\n", p.CalibrationRunning)
+	if lc := p.LastCalibration; lc != nil {
+		fmt.Printf("  last calib:  %s, %s (%s)\n",
 			lc.FinishedAt.Format("2006-01-02 15:04"), lc.Outcome, lc.Reason)
 		if lc.EnergyFullBeforeUWh > 0 || lc.EnergyFullAfterUWh > 0 {
-			fmt.Printf("  gauge full: %.1f -> %.1f Wh\n",
+			fmt.Printf("    gauge full: %.1f -> %.1f Wh\n",
 				float64(lc.EnergyFullBeforeUWh)/1e6, float64(lc.EnergyFullAfterUWh)/1e6)
 		}
 	} else {
-		fmt.Printf("last calib:  never\n")
+		fmt.Printf("  last calib:  never\n")
 	}
 }
 
 func cmdCalibrate(c control.Client, args []string) error {
 	fs := flag.NewFlagSet("calibrate", flag.ContinueOnError)
 	now := fs.Bool("now", false, "run immediately, bypassing the due-check")
+	bat := fs.String("battery", "", "pack to calibrate (required when more than one is present)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	resp, err := c.Do(control.Request{Cmd: control.CmdCalibrate, Args: map[string]string{"now": strconv.FormatBool(*now)}})
+	resp, err := c.Do(control.Request{Cmd: control.CmdCalibrate, Args: map[string]string{
+		"now":     strconv.FormatBool(*now),
+		"battery": *bat,
+	}})
 	if err != nil {
 		return err
 	}
@@ -118,23 +136,37 @@ func cmdCalibrate(c control.Client, args []string) error {
 }
 
 func cmdBand(c control.Client, args []string) error {
-	if len(args) != 2 {
-		return fmt.Errorf("usage: thinkbatt band <start> <stop>")
+	fs := flag.NewFlagSet("band", flag.ContinueOnError)
+	bat := fs.String("battery", "", "pack to set (default: every band-capable pack)")
+	if err := fs.Parse(args); err != nil {
+		return err
 	}
-	if _, err := strconv.Atoi(args[0]); err != nil {
-		return fmt.Errorf("start %q is not an integer", args[0])
+	rest := fs.Args()
+	if len(rest) != 2 {
+		return fmt.Errorf("usage: thinkbatt band [--battery BATx] <start> <stop>")
 	}
-	if _, err := strconv.Atoi(args[1]); err != nil {
-		return fmt.Errorf("stop %q is not an integer", args[1])
+	if _, err := strconv.Atoi(rest[0]); err != nil {
+		return fmt.Errorf("start %q is not an integer", rest[0])
 	}
-	resp, err := c.Do(control.Request{Cmd: control.CmdBand, Args: map[string]string{"start": args[0], "stop": args[1]}})
+	if _, err := strconv.Atoi(rest[1]); err != nil {
+		return fmt.Errorf("stop %q is not an integer", rest[1])
+	}
+	resp, err := c.Do(control.Request{Cmd: control.CmdBand, Args: map[string]string{
+		"start":   rest[0],
+		"stop":    rest[1],
+		"battery": *bat,
+	}})
 	if err != nil {
 		return err
 	}
 	if !resp.OK {
 		return fmt.Errorf("%s", resp.Error)
 	}
-	fmt.Printf("resting band set to %s-%s%% (runtime only; edit the config to persist)\n", args[0], args[1])
+	where := "every pack"
+	if *bat != "" {
+		where = *bat
+	}
+	fmt.Printf("resting band set to %s-%s%% on %s (runtime only; edit the config to persist)\n", rest[0], rest[1], where)
 	return nil
 }
 
@@ -154,11 +186,11 @@ func usage(w *os.File) {
 	fmt.Fprint(w, `thinkbatt - control client for thinkbattd
 
 usage:
-  thinkbatt status              show charge, band, capabilities, last calibration
-  thinkbatt calibrate [--now]   run a calibration (--now bypasses the due-check)
-  thinkbatt cancel              stop a running calibration
-  thinkbatt band <start> <stop> set the resting band (runtime only)
-  thinkbatt version             print version
+  thinkbatt status                              show every pack: charge, band, caps, last calibration
+  thinkbatt calibrate [--battery BATx] [--now]  calibrate a pack (--battery required if several present)
+  thinkbatt cancel                              stop the running calibration
+  thinkbatt band [--battery BATx] <start> <stop> set the resting band (runtime only; all packs by default)
+  thinkbatt version                             print version
 
 The daemon socket defaults to `+defaultSocket+`; override with THINKBATT_SOCKET.
 `)

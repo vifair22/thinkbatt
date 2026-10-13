@@ -18,22 +18,24 @@ type fakeHandler struct {
 	status      StatusInfo
 	statusErr   error
 	calibNow    bool
+	calibBat    string
 	calibCalled bool
 	calibErr    error
 	cancelErr   error
+	bandBat     string
 	bandStart   int
 	bandStop    int
 	bandErr     error
 }
 
 func (h *fakeHandler) Status() (StatusInfo, error) { return h.status, h.statusErr }
-func (h *fakeHandler) Calibrate(now bool) error {
-	h.calibCalled, h.calibNow = true, now
+func (h *fakeHandler) Calibrate(battery string, now bool) error {
+	h.calibCalled, h.calibBat, h.calibNow = true, battery, now
 	return h.calibErr
 }
 func (h *fakeHandler) Cancel() error { return h.cancelErr }
-func (h *fakeHandler) SetBand(start, stop int) error {
-	h.bandStart, h.bandStop = start, stop
+func (h *fakeHandler) SetBand(battery string, start, stop int) error {
+	h.bandBat, h.bandStart, h.bandStop = battery, start, stop
 	return h.bandErr
 }
 
@@ -54,7 +56,9 @@ func serve(t *testing.T, h Handler) (Client, func()) {
 }
 
 func TestStatusRoundTrip(t *testing.T) {
-	h := &fakeHandler{status: StatusInfo{Capacity: 79, Status: "Not charging", BandStart: 75, BandStop: 80}}
+	h := &fakeHandler{status: StatusInfo{Packs: []PackStatus{
+		{Name: "BAT0", Capacity: 79, Status: "Not charging", BandStart: 75, BandStop: 80},
+	}}}
 	c, stop := serve(t, h)
 	defer stop()
 
@@ -69,7 +73,7 @@ func TestStatusRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(resp.Data, &info); err != nil {
 		t.Fatal(err)
 	}
-	if info.Capacity != 79 || info.BandStop != 80 {
+	if len(info.Packs) != 1 || info.Packs[0].Capacity != 79 || info.Packs[0].BandStop != 80 {
 		t.Errorf("round trip mismatch: %+v", info)
 	}
 }
@@ -79,20 +83,20 @@ func TestCalibrateAndCancelAndBand(t *testing.T) {
 	c, stop := serve(t, h)
 	defer stop()
 
-	if resp, err := c.Do(Request{Cmd: CmdCalibrate, Args: map[string]string{"now": "true"}}); err != nil || !resp.OK {
+	if resp, err := c.Do(Request{Cmd: CmdCalibrate, Args: map[string]string{"now": "true", "battery": "BAT1"}}); err != nil || !resp.OK {
 		t.Fatalf("calibrate: %v %+v", err, resp)
 	}
-	if !h.calibCalled || !h.calibNow {
-		t.Errorf("Calibrate(now=true) not forwarded")
+	if !h.calibCalled || !h.calibNow || h.calibBat != "BAT1" {
+		t.Errorf("Calibrate(battery=BAT1, now=true) not forwarded: called=%t now=%t bat=%q", h.calibCalled, h.calibNow, h.calibBat)
 	}
 	if resp, err := c.Do(Request{Cmd: CmdCancel}); err != nil || !resp.OK {
 		t.Fatalf("cancel: %v %+v", err, resp)
 	}
-	if resp, err := c.Do(Request{Cmd: CmdBand, Args: map[string]string{"start": "70", "stop": "85"}}); err != nil || !resp.OK {
+	if resp, err := c.Do(Request{Cmd: CmdBand, Args: map[string]string{"start": "70", "stop": "85", "battery": "BAT1"}}); err != nil || !resp.OK {
 		t.Fatalf("band: %v %+v", err, resp)
 	}
-	if h.bandStart != 70 || h.bandStop != 85 {
-		t.Errorf("SetBand got %d/%d, want 70/85", h.bandStart, h.bandStop)
+	if h.bandBat != "BAT1" || h.bandStart != 70 || h.bandStop != 85 {
+		t.Errorf("SetBand got %q %d/%d, want BAT1 70/85", h.bandBat, h.bandStart, h.bandStop)
 	}
 }
 
