@@ -6,7 +6,7 @@ After=multi-user.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/thinkbattd
+ExecStart=/usr/bin/thinkbattd
 # Writes charge thresholds and charge_behaviour under /sys; needs root.
 User=root
 RuntimeDirectory=thinkbattd

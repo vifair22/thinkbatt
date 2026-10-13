@@ -1,15 +1,22 @@
 # thinkbatt CI pipeline.
 #
-# Stages follow the project standard (test -> analyze -> coverage -> build).
-# There is no deploy stage yet: the artifacts are two static binaries, a
-# systemd unit and a config, installed per machine by hand. Pre-1.0, so master
-# is worked on directly and branch protection is not wired yet.
+# Stages follow the project standard (test -> analyze -> coverage -> build),
+# plus a release stage that runs only on a vX.Y.Z tag. Pre-1.0, so master is
+# worked on directly; the v* tags are protected so only a release can publish.
+#
+# A tag pipeline runs the full test/analyze/coverage/build set (release needs
+# build:bins, which falls back to stage order and so gates on all of them),
+# then release:publish pushes the source tarball to the project's generic
+# package registry. The sys-power/thinkbatt ebuild in vifair-overlay fetches
+# that tarball as its SRC_URI, so a release is how a new version reaches the
+# fleet binhost.
 
 stages:
   - test
   - analyze
   - coverage
   - build
+  - release
 
 variables:
   GIT_DEPTH: "10"
@@ -88,3 +95,36 @@ build:bins:
     paths:
       - build/bin/
     expire_in: 4 weeks
+
+#-------------------------------------------------------------------------------
+# release (tag only)
+
+# A tag vX.Y.Z (release_version's, on master) publishes the source tarball to
+# the project's generic package registry and creates the GitLab release that
+# links it. The tarball's bytes are frozen here once; the overlay ebuild's
+# Manifest pins their hash. tools/release/publish.sh does the upload.
+release:publish:
+  stage: release
+  image: $GO_IMAGE
+  needs: ["build:bins"]
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+  before_script:
+    # The golang image has git; add curl and python3 for the upload and the
+    # release-notes JSON.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl python3 >/dev/null
+  script:
+    - |
+      want="v$(tr -d '[:space:]' < release_version)"
+      if [ "$CI_COMMIT_TAG" != "$want" ]; then
+        echo "tag $CI_COMMIT_TAG does not match release_version ($want)"; exit 1
+      fi
+    - VER="${CI_COMMIT_TAG#v}"
+    - mkdir -p release
+    - git archive --format=tar.gz --prefix="thinkbatt-${VER}/" -o "release/thinkbatt-${VER}.tar.gz" "$CI_COMMIT_TAG"
+    - (cd release && sha256sum "thinkbatt-${VER}.tar.gz" > SHA256SUMS)
+    - tools/release/publish.sh release
+  artifacts:
+    paths:
+      - release/
+    expire_in: never
