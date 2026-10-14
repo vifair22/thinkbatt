@@ -14,7 +14,9 @@ can do and does only that. A coreboot ThinkPad that exposes `force-discharge`
 with only charge thresholds gets band management; a machine with neither is left
 alone.
 
-It manages **every** battery present, not just the internal one. Packs are
+It manages **every** system battery present, not just the internal one
+(peripheral batteries such as a Bluetooth mouse, which the kernel marks
+`scope=Device`, are skipped). Packs are
 discovered automatically and tracked independently - a docked or bay pack (BAT1
 beside BAT0) is banded as soon as it appears and dropped when pulled, each pack
 keeps its own calibration history, and a `[BAT1]` section in the config gives a

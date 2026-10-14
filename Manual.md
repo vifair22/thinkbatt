@@ -52,9 +52,11 @@ names one.
 
 ## Multiple batteries
 
-thinkbatt manages every battery the machine presents, not just the internal
-pack. A ThinkPad with a bay or external pack shows it as `BAT1` beside the
-internal `BAT0`. Packs are **discovered automatically** and reconciled on each
+thinkbatt manages every system battery the machine presents, not just the
+internal pack. A ThinkPad with a bay or external pack shows it as `BAT1` beside
+the internal `BAT0`. Peripheral batteries (a Bluetooth mouse or keyboard, which
+the kernel also exposes as `type=Battery` but marks `scope=Device`) are not
+packs and are skipped. Packs are **discovered automatically** and reconciled on each
 maintenance pass: a pack docked while the daemon runs is picked up and banded
 within one interval, and a pack pulled is dropped. Each pack is tracked
 independently - its own capability detection, its own resting band, and its own

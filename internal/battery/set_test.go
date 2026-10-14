@@ -19,6 +19,14 @@ func writeSupply(t *testing.T, root, name, typ string) {
 	}
 }
 
+// writeScope adds a scope attribute to an existing supply directory.
+func writeScope(t *testing.T, root, name, scope string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, name, "scope"), []byte(scope+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSysfsSetList(t *testing.T) {
 	root := t.TempDir()
 	// Two packs, a mains supply, and a typeless directory: only the Battery-type
@@ -43,6 +51,26 @@ func TestSysfsSetList(t *testing.T) {
 	b := s.Open("BAT0")
 	if sb, ok := b.(*Sysfs); !ok || sb.bat != "BAT0" || sb.root != root {
 		t.Errorf("Open did not bind to BAT0 under root: %+v", b)
+	}
+}
+
+func TestSysfsSetListScope(t *testing.T) {
+	root := t.TempDir()
+	// A laptop pack with no scope (kept), one explicitly scope=System (kept), and
+	// a peripheral battery (a Bluetooth mouse) with scope=Device (dropped). Only
+	// the two system packs should be listed.
+	writeSupply(t, root, "BAT0", "Battery")
+	writeSupply(t, root, "BAT1", "Battery")
+	writeScope(t, root, "BAT1", "System")
+	writeSupply(t, root, "hidpp_battery_0", "Battery")
+	writeScope(t, root, "hidpp_battery_0", "Device")
+
+	got, err := NewSysfsSet(root).List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if want := []string{"BAT0", "BAT1"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("List = %v, want %v (scope=Device peripheral should be dropped)", got, want)
 	}
 }
 

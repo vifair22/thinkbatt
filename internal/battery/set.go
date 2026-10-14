@@ -30,9 +30,13 @@ func NewSysfsSet(root string) *SysfsSet {
 	return &SysfsSet{root: root}
 }
 
-// List returns every supply under the root whose type is "Battery", sorted by
-// name. Scanning by type (rather than a BAT* glob) is how acOnline finds Mains
-// supplies too, and avoids assuming the kernel's naming.
+// List returns every supply under the root that is a system battery pack,
+// sorted by name. A supply qualifies when its type is "Battery" and its scope
+// is not "Device". Scanning by type (rather than a BAT* glob) is how acOnline
+// finds Mains supplies too, and avoids assuming the kernel's naming; the scope
+// filter drops peripheral batteries (a Bluetooth mouse or keyboard reports
+// type=Battery scope=Device), which are not packs this daemon manages. Real
+// laptop packs report no scope attribute (kept) or scope=System.
 func (s *SysfsSet) List() ([]string, error) {
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
@@ -42,6 +46,13 @@ func (s *SysfsSet) List() ([]string, error) {
 	for _, e := range entries {
 		typ, err := readStr(filepath.Join(s.root, e.Name(), "type"))
 		if err != nil || typ != "Battery" {
+			continue
+		}
+		// scope is optional; absent means a system pack. Only an explicit
+		// "Device" marks a peripheral, so exclude that and keep everything else
+		// (absent, System, Unknown) rather than allow-listing and risking a real
+		// pack being dropped on an unusual model.
+		if scope, err := readStr(filepath.Join(s.root, e.Name(), "scope")); err == nil && scope == "Device" {
 			continue
 		}
 		names = append(names, e.Name())
