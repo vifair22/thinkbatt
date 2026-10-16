@@ -26,6 +26,14 @@ type fakeHandler struct {
 	bandStart   int
 	bandStop    int
 	bandErr     error
+	ovBat       string
+	ovTarget    int
+	ovUntil     time.Time
+	ovFull      bool
+	ovErr       error
+	clearBat    string
+	clearCalled bool
+	clearErr    error
 }
 
 func (h *fakeHandler) Status() (StatusInfo, error) { return h.status, h.statusErr }
@@ -37,6 +45,15 @@ func (h *fakeHandler) Cancel() error { return h.cancelErr }
 func (h *fakeHandler) SetBand(battery string, start, stop int) error {
 	h.bandBat, h.bandStart, h.bandStop = battery, start, stop
 	return h.bandErr
+}
+
+func (h *fakeHandler) SetOverride(battery string, target int, until time.Time, untilFull bool) error {
+	h.ovBat, h.ovTarget, h.ovUntil, h.ovFull = battery, target, until, untilFull
+	return h.ovErr
+}
+func (h *fakeHandler) ClearOverride(battery string) error {
+	h.clearCalled, h.clearBat = true, battery
+	return h.clearErr
 }
 
 func serve(t *testing.T, h Handler) (Client, func()) {
@@ -218,5 +235,52 @@ func TestDialFailure(t *testing.T) {
 	c := Client{Path: filepath.Join(t.TempDir(), "nonexistent.sock"), Timeout: 200 * time.Millisecond}
 	if _, err := c.Do(Request{Cmd: CmdStatus}); err == nil {
 		t.Errorf("dialing a missing socket should error")
+	}
+}
+
+func TestChargeAndReset(t *testing.T) {
+	h := &fakeHandler{}
+	c, stop := serve(t, h)
+	defer stop()
+
+	if resp, err := c.Do(Request{Cmd: CmdCharge, Args: map[string]string{"target": "100", "until": UntilFull, "battery": "BAT0"}}); err != nil || !resp.OK {
+		t.Fatalf("charge until full: %v %+v", err, resp)
+	}
+	if h.ovBat != "BAT0" || h.ovTarget != 100 || !h.ovFull || !h.ovUntil.IsZero() {
+		t.Errorf("SetOverride got %q %d full=%t until=%s", h.ovBat, h.ovTarget, h.ovFull, h.ovUntil)
+	}
+
+	deadline := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	if resp, err := c.Do(Request{Cmd: CmdCharge, Args: map[string]string{"target": "90", "until": deadline.Format(time.RFC3339)}}); err != nil || !resp.OK {
+		t.Fatalf("charge until deadline: %v %+v", err, resp)
+	}
+	if h.ovTarget != 90 || h.ovFull || !h.ovUntil.Equal(deadline) {
+		t.Errorf("SetOverride got %d full=%t until=%s, want 90 until %s", h.ovTarget, h.ovFull, h.ovUntil, deadline)
+	}
+
+	if resp, err := c.Do(Request{Cmd: CmdChargeReset, Args: map[string]string{"battery": "BAT1"}}); err != nil || !resp.OK {
+		t.Fatalf("charge reset: %v %+v", err, resp)
+	}
+	if !h.clearCalled || h.clearBat != "BAT1" {
+		t.Errorf("ClearOverride not forwarded: called=%t bat=%q", h.clearCalled, h.clearBat)
+	}
+}
+
+func TestChargeErrors(t *testing.T) {
+	h := &fakeHandler{ovErr: errTest, clearErr: errTest}
+	c, stop := serve(t, h)
+	defer stop()
+	bad := []map[string]string{
+		{"target": "x", "until": UntilFull},        // non-integer target
+		{"target": "100", "until": "tomorrow-ish"}, // unparseable deadline
+		{"target": "100", "until": UntilFull},      // handler error
+	}
+	for _, args := range bad {
+		if resp, _ := c.Do(Request{Cmd: CmdCharge, Args: args}); resp.OK || resp.Error == "" {
+			t.Errorf("charge %v should error", args)
+		}
+	}
+	if resp, _ := c.Do(Request{Cmd: CmdChargeReset}); resp.OK {
+		t.Errorf("charge reset handler error should propagate")
 	}
 }

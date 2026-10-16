@@ -97,9 +97,7 @@ func (s *Sysfs) Read() (Reading, error) {
 		{"energy_full", &r.EnergyFullUWh},
 		{"energy_full_design", &r.EnergyFullDesignUWh},
 		{"voltage_now", &r.VoltageNowUV},
-		// power_now is the discharge controller's feedback signal. Some packs
-		// expose current_now instead; deriving power from current_now*voltage_now
-		// for those is a portability TODO (this fleet's packs report power_now).
+		// power_now is the discharge controller's feedback signal.
 		{"power_now", &r.PowerNowUW},
 	} {
 		v, err := optInt(s.batPath(f.attr))
@@ -108,6 +106,27 @@ func (s *Sysfs) Read() (Reading, error) {
 		}
 		*f.dst = v
 	}
+	// A pack whose firmware declares charge units (ACPI power unit mA/mAh, as
+	// coreboot's ChromeEC battery ASL does on a C14) gets charge_* and
+	// current_now from the kernel instead of energy_* and power_now, and the
+	// kernel does not synthesise the other set. Convert as upower does, so
+	// everything above this layer sees one unit system.
+	if r.EnergyNowUWh == 0 && r.EnergyFullUWh == 0 && r.EnergyFullDesignUWh == 0 {
+		if err := s.readChargeAsEnergy(&r); err != nil {
+			return r, err
+		}
+	}
+	// The same packs have current_now but no power_now; derive it. Drivers
+	// disagree on whether either is signed, so both are taken as magnitudes and
+	// Status carries the direction.
+	if r.PowerNowUW == 0 {
+		cur, err := optInt(s.batPath("current_now"))
+		if err != nil {
+			return r, fmt.Errorf("read current_now: %w", err)
+		}
+		r.PowerNowUW = abs64(cur) * r.VoltageNowUV / 1_000_000
+	}
+	r.PowerNowUW = abs64(r.PowerNowUW)
 	cc, err := optInt(s.batPath("cycle_count"))
 	if err != nil {
 		return r, fmt.Errorf("read cycle_count: %w", err)
@@ -238,4 +257,41 @@ func (s *Sysfs) readBehaviour() (avail []Behaviour, active Behaviour, err error)
 
 func (s *Sysfs) SetBehaviour(b Behaviour) error {
 	return writeStr(s.batPath("charge_behaviour"), string(b))
+}
+
+// readChargeAsEnergy fills the energy fields from charge_* (microamp-hours).
+// The conversion voltage is voltage_min_design, the pack's nominal voltage and
+// the conventional choice (upower, the ACPI spec's own mAh/mWh relation); it
+// falls back to voltage_now when the design figure is absent. A pack with
+// neither set leaves the energy fields at zero, as before.
+func (s *Sysfs) readChargeAsEnergy(r *Reading) error {
+	volt, err := optInt(s.batPath("voltage_min_design"))
+	if err != nil {
+		return fmt.Errorf("read voltage_min_design: %w", err)
+	}
+	if volt == 0 {
+		volt = r.VoltageNowUV
+	}
+	for _, f := range []struct {
+		attr string
+		dst  *int64
+	}{
+		{"charge_now", &r.EnergyNowUWh},
+		{"charge_full", &r.EnergyFullUWh},
+		{"charge_full_design", &r.EnergyFullDesignUWh},
+	} {
+		v, err := optInt(s.batPath(f.attr))
+		if err != nil {
+			return fmt.Errorf("read %s: %w", f.attr, err)
+		}
+		*f.dst = v * volt / 1_000_000
+	}
+	return nil
+}
+
+func abs64(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
 }

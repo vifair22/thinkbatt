@@ -37,6 +37,14 @@ thinkbatt reads the kernel power_supply sysfs and adapts per machine:
 the H8 charge-behaviour methods enabled has the full set; a stock-firmware
 machine typically has thresholds only.
 
+Packs report their gauge in one of two unit systems, depending on the
+firmware: energy (`energy_*` in uWh, `power_now`) or charge (`charge_*` in uAh,
+`current_now`). The ThinkPads with an H8 EC report energy; the C14's ChromeEC
+battery reports charge. thinkbatt converts a charge-unit pack to energy the way
+upower does, charge x `voltage_min_design` (falling back to `voltage_now`), and
+power as current x `voltage_now`, so status, calibration records and the
+discharge assist's C-rate target work the same on both.
+
 ## The resting band
 
 The daemon writes the band (default 75/80) and `charge_behaviour=auto` at
@@ -49,6 +57,69 @@ given, so the band is safe across a daemon restart.
 back to the config; edit `/etc/thinkbatt/thinkbatt.ini` to make it permanent.
 With more than one pack it sets every band-capable pack unless `--battery BATx`
 names one.
+
+### Desktop charge limit settings
+
+KDE Plasma's Power Management settings also offer a charge limit, written
+through powerdevil's `chargethresholdhelper`. Leave it alone on a thinkbatt
+machine. Powerdevil only writes the thresholds when Apply is pressed in that
+page, so it does not fight thinkbatt on its own, but pressing Apply there
+writes its own value, which thinkbatt then overwrites on its next pass.
+Powerdevil also reads the thresholds once, when it starts, and does not notice
+later changes: during a charge override, or after `thinkbatt band`, Plasma's
+battery popup still reports the old "charge up to" figure. `thinkbatt status`
+is authoritative.
+
+## Charge overrides
+
+A charge override holds packs at a higher (or lower) target for a while, then
+returns them to the resting band on its own. It is the "I need a full battery
+for tomorrow's trip" switch, and saves editing the band and remembering to put
+it back.
+
+```sh
+thinkbatt charge full                          # top up to 100% once, then back to the band
+thinkbatt charge full --until 09:00            # hold 100% until 09:00 (next occurrence)
+thinkbatt charge 90 --until "2026-10-18 09:00" # hold 90% until a date and time
+thinkbatt charge full --battery BAT1           # one pack only
+thinkbatt charge reset                         # end it now
+```
+
+The target is applied as the threshold pair `target-1`/`target` (99/100 for
+full). The start threshold has to move too: charging resumes only below start,
+so raising the stop alone leaves a pack sitting at 78% under a 75/100 band
+without charging at all.
+
+How an override ends:
+
+| `--until` | Ends |
+|-----------|------|
+| `full` (default) | when the pack reaches the target, or sits on AC with the charger stopped within 3 points of it (an EC may decline the last percent, as at the top of a calibration). Unplugging part way does not end it; it carries on when AC returns. |
+| `HH:MM` | at the next occurrence of that local time: later today, or tomorrow if it has passed |
+| `YYYY-MM-DD HH:MM` | at that local date and time, which must be in the future |
+
+Expiry is checked on the maintenance pass, so an override ends within
+`--maintain-interval` (2 minutes) of its deadline. Deadlines are wall-clock
+time, so time spent suspended counts. The override is saved in the state file
+and survives a reboot or daemon restart; a deadline that passed while the
+machine was off ends it on the first pass after startup.
+
+Ending an override restores the band but does not drain the pack. A pack
+topped up to 100% stays near there on AC until it is used down to the band;
+that is the point of "until full".
+
+Interactions:
+
+- **Calibration.** An override on a pack blocks its automatic calibration, and
+  `calibrate --now` on it is refused until the override is cleared: a learning
+  cycle drains to the floor, the opposite of what was asked. Setting an override
+  on a pack that is calibrating cancels the run (recorded as aborted, "cancelled
+  for a charge override"), waits for it to unwind, then applies the override.
+- **`thinkbatt band`.** Changing the band during an override changes the band
+  the pack returns to. The override stays in force.
+- **Pulled packs.** An override is kept for a pack that is removed. A deadline
+  override still expires on time; an until-full one waits for the pack to come
+  back, or for `charge reset`.
 
 ## Multiple batteries
 
@@ -139,7 +210,13 @@ and re-asserts the bands. The first run after install, with no prior calibration
 recorded for a pack, is due immediately.
 
 Force a run regardless of the schedule with `thinkbatt calibrate --now`.
-`thinkbatt cancel` stops a run; the band is restored as it unwinds.
+`thinkbatt cancel` stops a run; the band is restored as it unwinds. A pack under
+a charge override is never calibrated (see Charge overrides).
+
+`thinkbatt status` shows the phase of a running calibration (charging, resting
+at full, discharging, resting at floor, recharging, draining to band), and the
+recorded reason for an aborted one says what cancelled it: the user, a charge
+override, or daemon shutdown.
 
 ## Configuration
 
@@ -186,5 +263,9 @@ confirm the pack returns to the band at the end. Confirm `thinkbatt cancel` and
   `force-discharge`. Band management still works; the full cycle does not.
 - **Calibration keeps aborting "AC lost"** - a flaky adapter or dock; the run
   needs AC throughout.
-- **Band not holding** - another actor (an old udev rule, TLP) is also writing
-  the thresholds. Remove it; thinkbatt is the owner.
+- **Band not holding** - another actor (an old udev rule, TLP, Plasma's charge
+  limit) is also writing the thresholds. Remove it; thinkbatt is the owner.
+- **Plasma says "charge up to 80%" during an override** - powerdevil caches the
+  threshold it read at login. Cosmetic; see Desktop charge limit settings.
+- **`calibrate` refused with "has a charge override"** - clear it with
+  `thinkbatt charge reset` first.

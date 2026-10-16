@@ -2,6 +2,7 @@ package calib
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -304,5 +305,42 @@ func assertResting(t *testing.T, sim *battery.Sim, start, stop int) {
 	}
 	if st != start || sp != stop {
 		t.Errorf("band left at %d/%d, want %d/%d", st, sp, start, stop)
+	}
+}
+
+// TestPhaseReported checks the engine names each phase while it is in it and
+// clears the phase once the run is over.
+func TestPhaseReported(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	e := New(sim, clk, nil, restParams(), nil)
+	seen := map[string]bool{}
+	clk.after = func() { seen[e.Phase()] = true }
+	if _, err := e.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for _, p := range []string{PhaseCharging, PhaseRestFull, PhaseDischarging, PhaseRestFloor, PhaseRecharging, PhaseDrainingBand} {
+		if !seen[p] {
+			t.Errorf("phase %q never reported; saw %v", p, seen)
+		}
+	}
+	if got := e.Phase(); got != "" {
+		t.Errorf("phase after run = %q, want empty", got)
+	}
+}
+
+// TestCancelCauseRecorded checks a cancellation with a cause records that cause
+// as the abort reason.
+func TestCancelCauseRecorded(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	clk.after = func() { cancel(errors.New("cancelled for a test")) }
+	res, err := New(sim, clk, nil, stdParams(), nil).Run(ctx)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Outcome != state.OutcomeAborted || res.Reason != "cancelled for a test" {
+		t.Errorf("outcome = %q (%s), want aborted with the cause", res.Outcome, res.Reason)
 	}
 }

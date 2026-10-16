@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"git.airies.net/vifair22/thinkbatt/internal/battery"
@@ -92,6 +93,33 @@ type Engine struct {
 	log    *slog.Logger
 	params Params
 	assist DischargeAssist
+
+	mu    sync.Mutex
+	phase string // what the run is doing now, for status; "" before and after
+}
+
+// Phase names reported while a run is in progress.
+const (
+	PhaseCharging     = "charging"
+	PhaseRestFull     = "resting at full"
+	PhaseDischarging  = "discharging"
+	PhaseRestFloor    = "resting at floor"
+	PhaseRecharging   = "recharging"
+	PhaseDrainingBand = "draining to band"
+)
+
+// Phase reports what the run is doing now, or "" when it is not in a phase. It
+// is safe to call from another goroutine while Run executes.
+func (e *Engine) Phase() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.phase
+}
+
+func (e *Engine) setPhase(p string) {
+	e.mu.Lock()
+	e.phase = p
+	e.mu.Unlock()
 }
 
 // New builds an Engine. A nil clock uses the real clock; a nil logger discards.
@@ -147,6 +175,7 @@ func (e *Engine) Run(ctx context.Context) (res Result, err error) {
 	// writes are immediate and do not block. Stop the load first so nothing
 	// keeps discharging while the band is restored.
 	defer func() {
+		e.setPhase("")
 		if e.assist != nil {
 			e.assist.Stop()
 		}
@@ -176,7 +205,12 @@ func (e *Engine) Run(ctx context.Context) (res Result, err error) {
 	case phaseErr == nil:
 		res.Outcome, res.Reason = state.OutcomeOK, "learning cycle complete"
 	case errors.Is(phaseErr, context.Canceled), errors.Is(phaseErr, context.DeadlineExceeded):
+		// A caller that cancels with a cause (a user cancel, a charge override,
+		// shutdown) gets that cause recorded instead of a bare "cancelled".
 		res.Outcome, res.Reason = state.OutcomeAborted, "cancelled"
+		if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+			res.Reason = cause.Error()
+		}
 	default:
 		var ab errAbort
 		if errors.As(phaseErr, &ab) {
@@ -200,6 +234,7 @@ func (e *Engine) Run(ctx context.Context) (res Result, err error) {
 func (e *Engine) cycle(ctx context.Context, targetW float64) error {
 	p := e.params
 
+	e.setPhase(PhaseCharging)
 	e.log.Info("calibration: charging to full")
 	if err := e.bat.SetThresholds(99, 100); err != nil {
 		return fmt.Errorf("set charge-to-full thresholds: %w", err)
@@ -211,10 +246,11 @@ func (e *Engine) cycle(ctx context.Context, targetW float64) error {
 		return err
 	}
 
-	if err := e.rest(ctx, "full", p.RestAtFull); err != nil {
+	if err := e.rest(ctx, "full", PhaseRestFull, p.RestAtFull); err != nil {
 		return err
 	}
 
+	e.setPhase(PhaseDischarging)
 	e.log.Info("calibration: discharging to floor", "floor", p.Floor, "target_w", targetW)
 	if err := e.bat.SetBehaviour(battery.BehaviourForceDischarge); err != nil {
 		return fmt.Errorf("set force-discharge: %w", err)
@@ -226,10 +262,11 @@ func (e *Engine) cycle(ctx context.Context, targetW float64) error {
 		return errFloor
 	}
 
-	if err := e.rest(ctx, "floor", p.RestAtFloor); err != nil {
+	if err := e.rest(ctx, "floor", PhaseRestFloor, p.RestAtFloor); err != nil {
 		return err
 	}
 
+	e.setPhase(PhaseRecharging)
 	e.log.Info("calibration: recharging to full")
 	if err := e.bat.SetBehaviour(battery.BehaviourAuto); err != nil {
 		return fmt.Errorf("set auto for recharge: %w", err)
@@ -238,6 +275,7 @@ func (e *Engine) cycle(ctx context.Context, targetW float64) error {
 		return err
 	}
 
+	e.setPhase(PhaseDrainingBand)
 	e.log.Info("calibration: draining to resting band", "stop", p.BandStop)
 	if err := e.drainToBand(ctx, p.BandStop, targetW, p.DischargeTimeout); err != nil {
 		return err
@@ -250,7 +288,7 @@ func (e *Engine) cycle(ctx context.Context, targetW float64) error {
 // A zero duration skips the rest; a machine without inhibit-charge skips it with
 // a warning (the relearn is weaker but the cycle still runs). AC loss aborts,
 // since without AC the pack would drain through the rest.
-func (e *Engine) rest(ctx context.Context, where string, dur time.Duration) error {
+func (e *Engine) rest(ctx context.Context, where, phase string, dur time.Duration) error {
 	if dur <= 0 {
 		return nil
 	}
@@ -262,6 +300,7 @@ func (e *Engine) rest(ctx context.Context, where string, dur time.Duration) erro
 		e.log.Warn("inhibit-charge unsupported; skipping relaxation rest (weaker relearn)", "at", where)
 		return nil
 	}
+	e.setPhase(phase)
 	e.log.Info("calibration: resting", "at", where, "for", dur)
 	if err := e.bat.SetBehaviour(battery.BehaviourInhibitCharge); err != nil {
 		return fmt.Errorf("set inhibit-charge for %s rest: %w", where, err)

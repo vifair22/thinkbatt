@@ -119,3 +119,43 @@ func TestLoadCorrupt(t *testing.T) {
 		t.Errorf("expected error on corrupt state")
 	}
 }
+
+func TestOverrideRoundTripAndClear(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "state.json")
+	var s State
+	deadline := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	s.SetOverride("BAT0", &Override{Target: 100, Until: deadline, SetAt: deadline.Add(-time.Hour)})
+	s.SetOverride("BAT1", &Override{Target: 90, UntilFull: true})
+	if err := Save(p, s); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(p)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if o := got.Override("BAT0"); o == nil || o.Target != 100 || !o.Until.Equal(deadline) || o.UntilFull {
+		t.Errorf("BAT0 override round trip mismatch: %+v", o)
+	}
+	if o := got.Override("BAT1"); o == nil || !o.UntilFull || !o.Until.IsZero() {
+		t.Errorf("BAT1 override round trip mismatch: %+v", o)
+	}
+	got.SetOverride("BAT0", nil)
+	if got.Override("BAT0") != nil {
+		t.Errorf("SetOverride(nil) did not clear")
+	}
+	var empty State
+	empty.SetOverride("BAT0", nil) // clearing on a nil map must not panic
+}
+
+func TestCloneIsDeep(t *testing.T) {
+	var s State
+	s.SetLast("BAT0", &Calibration{Outcome: OutcomeOK})
+	s.SetOverride("BAT0", &Override{Target: 100})
+	c := s.Clone()
+	s.Last("BAT0").Outcome = OutcomeFailed
+	s.Override("BAT0").Target = 50
+	s.SetOverride("BAT1", &Override{Target: 90})
+	if c.Last("BAT0").Outcome != OutcomeOK || c.Override("BAT0").Target != 100 || c.Override("BAT1") != nil {
+		t.Errorf("clone shares memory with the original: %+v %+v", c.Last("BAT0"), c.Override("BAT0"))
+	}
+}

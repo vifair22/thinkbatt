@@ -197,3 +197,90 @@ func TestNewSysfsDefaults(t *testing.T) {
 		t.Errorf("defaults not applied: root=%q bat=%q", s.root, s.bat)
 	}
 }
+
+func TestSysfsPowerDerivedFromCurrent(t *testing.T) {
+	attrs := baseAttrs()
+	attrs["voltage_now"] = "11273000"
+	attrs["current_now"] = "-601000" // signed by some drivers; taken as a magnitude
+	r, err := NewSysfs(writeTree(t, attrs, "0"), "BAT0").Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if want := int64(601000) * 11273000 / 1_000_000; r.PowerNowUW != want {
+		t.Errorf("derived power = %d uW, want %d", r.PowerNowUW, want)
+	}
+
+	attrs["power_now"] = "-7000000" // reported directly: preferred, as a magnitude
+	r, err = NewSysfs(writeTree(t, attrs, "0"), "BAT0").Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if r.PowerNowUW != 7_000_000 {
+		t.Errorf("power_now = %d uW, want 7000000", r.PowerNowUW)
+	}
+}
+
+// c14Attrs is a pack whose firmware reports charge units: no energy_* or
+// power_now, as the C14's ChromeEC ACPI battery does.
+func c14Attrs() map[string]string {
+	return map[string]string{
+		"capacity":           "58",
+		"status":             "Discharging",
+		"charge_now":         "2898000",
+		"charge_full":        "4928000",
+		"charge_full_design": "4948000",
+		"current_now":        "629000",
+		"voltage_now":        "11273000",
+		"voltage_min_design": "11520000",
+		"cycle_count":        "12",
+	}
+}
+
+func TestSysfsChargeUnitsConvertToEnergy(t *testing.T) {
+	r, err := NewSysfs(writeTree(t, c14Attrs(), "0"), "BAT0").Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	// uAh * uV(min design) / 1e6 = uWh
+	if want := int64(4948000) * 11520000 / 1_000_000; r.EnergyFullDesignUWh != want {
+		t.Errorf("design energy = %d uWh, want %d", r.EnergyFullDesignUWh, want)
+	}
+	if want := int64(4928000) * 11520000 / 1_000_000; r.EnergyFullUWh != want {
+		t.Errorf("full energy = %d uWh, want %d", r.EnergyFullUWh, want)
+	}
+	if want := int64(2898000) * 11520000 / 1_000_000; r.EnergyNowUWh != want {
+		t.Errorf("energy now = %d uWh, want %d", r.EnergyNowUWh, want)
+	}
+	if want := int64(629000) * 11273000 / 1_000_000; r.PowerNowUW != want {
+		t.Errorf("power = %d uW, want %d", r.PowerNowUW, want)
+	}
+}
+
+func TestSysfsChargeUnitsFallBackToVoltageNow(t *testing.T) {
+	attrs := c14Attrs()
+	delete(attrs, "voltage_min_design")
+	r, err := NewSysfs(writeTree(t, attrs, "0"), "BAT0").Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if want := int64(4948000) * 11273000 / 1_000_000; r.EnergyFullDesignUWh != want {
+		t.Errorf("design energy = %d uWh, want %d (via voltage_now)", r.EnergyFullDesignUWh, want)
+	}
+}
+
+func TestSysfsChargeUnitsReadError(t *testing.T) {
+	for _, attr := range []string{"voltage_min_design", "charge_full"} {
+		attrs := c14Attrs()
+		root := writeTree(t, attrs, "0")
+		p := filepath.Join(root, "BAT0", attr)
+		if err := os.Remove(p); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(p, 0o755); err != nil { // a directory reads as an error, not as absent
+			t.Fatal(err)
+		}
+		if _, err := NewSysfs(root, "BAT0").Read(); err == nil {
+			t.Errorf("Read with unreadable %s should error", attr)
+		}
+	}
+}

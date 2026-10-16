@@ -423,3 +423,285 @@ func TestShutdownWaitsForRun(t *testing.T) {
 		t.Errorf("calibration still running after Shutdown")
 	}
 }
+
+// blockClock parks a calibration in its first wait until it is cancelled, so a
+// test can act on a run that is reliably in progress.
+type blockClock struct{ now time.Time }
+
+func (c *blockClock) Now() time.Time { return c.now }
+
+func (c *blockClock) Sleep(ctx context.Context, _ time.Duration) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func thresholds(t *testing.T, b battery.Battery) (int, int) {
+	t.Helper()
+	start, stop, err := b.Thresholds()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return start, stop
+}
+
+// waitPhase polls until the pack reports a calibration phase.
+func waitPhase(t *testing.T, d *Daemon, want string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		info, err := d.Status()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, p := range info.Packs {
+			if p.CalibrationPhase == want {
+				return
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("calibration never reached phase %q", want)
+}
+
+func TestOverrideSetPersistsAndReloads(t *testing.T) {
+	sim0, sim1 := fullSetSim(79), fullSetSim(60)
+	set := newFakeSet(map[string]battery.Battery{"BAT0": sim0, "BAT1": sim1})
+	clk := &fakeClock{now: time.Unix(1_000_000, 0), sim: sim0}
+	d := newDaemon(t, set, clk, &countInhibitor{})
+
+	deadline := clk.Now().Add(8 * time.Hour)
+	if err := d.SetOverride("", 100, deadline, false); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+	for name, sim := range map[string]*battery.Sim{"BAT0": sim0, "BAT1": sim1} {
+		if start, stop := thresholds(t, sim); start != 99 || stop != 100 {
+			t.Errorf("%s thresholds = %d/%d, want 99/100", name, start, stop)
+		}
+	}
+	info, _ := d.Status()
+	for _, p := range info.Packs {
+		if p.Override == nil || p.Override.Target != 100 || !p.Override.Until.Equal(deadline) {
+			t.Errorf("%s status override = %+v", p.Name, p.Override)
+		}
+		if p.BandStart != 75 || p.BandStop != 80 {
+			t.Errorf("%s resting band reported as %d/%d, want 75/80", p.Name, p.BandStart, p.BandStop)
+		}
+	}
+
+	// A daemon restarted on the same state file comes back with the override.
+	d2, err := New(Options{Set: set, File: config.File{Global: config.Default()}, StatePath: d.statePath, Clock: clk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d2.Refresh()
+	_ = sim0.SetThresholds(75, 80) // a firmware reset across the restart
+	d2.Maintain(clk.Now())
+	if start, stop := thresholds(t, sim0); start != 99 || stop != 100 {
+		t.Errorf("override not re-applied after restart: %d/%d", start, stop)
+	}
+}
+
+func TestOverrideBlocksCalibration(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	d := newDaemon(t, singlePack(sim), clk, &countInhibitor{})
+	if err := d.SetOverride("", 100, time.Time{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Calibrate("", true); err == nil {
+		t.Errorf("Calibrate --now should be refused under an override")
+	}
+	d.Maintain(clk.Now()) // never calibrated, so due, but the override blocks it
+	if info, _ := d.Status(); anyRunning(info) || lastOf(info, "BAT0") != nil {
+		t.Errorf("Maintain started a calibration on an overridden pack")
+	}
+}
+
+func TestOverrideDeadlineExpires(t *testing.T) {
+	sim := fullSetSim(79)
+	set := singlePack(sim)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	d := newDaemon(t, set, clk, &countInhibitor{})
+	d.mu.Lock()
+	d.packs["BAT0"].cfg.CalibEnabled = false // keep the due-check out of the way
+	d.mu.Unlock()
+
+	deadline := clk.Now().Add(time.Hour)
+	if err := d.SetOverride("BAT0", 100, deadline, false); err != nil {
+		t.Fatal(err)
+	}
+	d.Maintain(deadline.Add(-time.Minute))
+	if start, stop := thresholds(t, sim); start != 99 || stop != 100 {
+		t.Errorf("override ended early: %d/%d", start, stop)
+	}
+	d.Maintain(deadline)
+	if start, stop := thresholds(t, sim); start != 75 || stop != 80 {
+		t.Errorf("band not restored at deadline: %d/%d", start, stop)
+	}
+	if loaded, _ := state.Load(d.statePath); loaded.Override("BAT0") != nil {
+		t.Errorf("expired override still persisted")
+	}
+
+	// A deadline override on a pack that has since been pulled still expires.
+	if err := d.SetOverride("BAT0", 100, deadline.Add(time.Hour), false); err != nil {
+		t.Fatal(err)
+	}
+	set.remove("BAT0")
+	d.Maintain(deadline.Add(2 * time.Hour))
+	d.mu.Lock()
+	left := d.st.Override("BAT0")
+	d.mu.Unlock()
+	if left != nil {
+		t.Errorf("deadline override on an absent pack did not expire")
+	}
+}
+
+func TestOverrideUntilFullExpires(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &fakeClock{now: time.Unix(0, 0), sim: sim}
+	d := newDaemon(t, singlePack(sim), clk, &countInhibitor{})
+	d.mu.Lock()
+	d.packs["BAT0"].cfg.CalibEnabled = false
+	d.mu.Unlock()
+
+	if err := d.SetOverride("", 100, time.Time{}, true); err != nil {
+		t.Fatal(err)
+	}
+	d.Maintain(clk.Now())
+	if start, stop := thresholds(t, sim); start != 99 || stop != 100 {
+		t.Fatalf("until-full override ended before charging: %d/%d", start, stop)
+	}
+	// Charge the sim to full in virtual time, then the next pass ends it.
+	_ = clk.Sleep(context.Background(), 2*time.Hour)
+	d.Maintain(clk.Now())
+	if start, stop := thresholds(t, sim); start != 75 || stop != 80 {
+		t.Errorf("band not restored once full: %d/%d", start, stop)
+	}
+	if r, _ := sim.Read(); r.Capacity < 97 {
+		t.Errorf("sim only reached %d%%", r.Capacity)
+	}
+}
+
+func TestOverrideCancelsRunningCalibration(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &blockClock{now: time.Unix(0, 0)}
+	d := newDaemon(t, singlePack(sim), clk, &countInhibitor{})
+
+	if err := d.Calibrate("", true); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, d, calib.PhaseCharging)
+	if err := d.SetOverride("", 90, clk.Now().Add(time.Hour), false); err != nil {
+		t.Fatalf("SetOverride: %v", err)
+	}
+	// SetOverride waited the run out: it is over, recorded, and the override's
+	// band is what the pack is left at, not the engine's resting-band restore.
+	info, _ := d.Status()
+	if anyRunning(info) {
+		t.Errorf("calibration still running after the override")
+	}
+	if lc := lastOf(info, "BAT0"); lc == nil || lc.Outcome != state.OutcomeAborted || lc.Reason != errCancelOverride.Error() {
+		t.Errorf("last calibration = %+v, want aborted for the override", lc)
+	}
+	if start, stop := thresholds(t, sim); start != 89 || stop != 90 {
+		t.Errorf("thresholds = %d/%d, want the override's 89/90", start, stop)
+	}
+}
+
+func TestBandChangedDuringRunAppliesAtEnd(t *testing.T) {
+	sim := fullSetSim(79)
+	clk := &blockClock{now: time.Unix(0, 0)}
+	d := newDaemon(t, singlePack(sim), clk, &countInhibitor{})
+	if err := d.Calibrate("", true); err != nil {
+		t.Fatal(err)
+	}
+	waitPhase(t, d, calib.PhaseCharging)
+	if err := d.SetBand("", 60, 70); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Cancel(); err != nil {
+		t.Fatal(err)
+	}
+	waitIdle(t, d)
+	if start, stop := thresholds(t, sim); start != 60 || stop != 70 {
+		t.Errorf("thresholds after run = %d/%d, want the band set mid-run 60/70", start, stop)
+	}
+	info, _ := d.Status()
+	if lc := lastOf(info, "BAT0"); lc == nil || lc.Reason != errCancelUser.Error() {
+		t.Errorf("last calibration = %+v, want cancelled by user", lc)
+	}
+}
+
+func TestSetBandUnderOverride(t *testing.T) {
+	sim := fullSetSim(79)
+	d := newDaemon(t, singlePack(sim), &fakeClock{now: time.Unix(0, 0), sim: sim}, &countInhibitor{})
+	if err := d.SetOverride("", 100, time.Time{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetBand("", 50, 60); err != nil {
+		t.Fatal(err)
+	}
+	if start, stop := thresholds(t, sim); start != 99 || stop != 100 {
+		t.Errorf("SetBand displaced the override: %d/%d", start, stop)
+	}
+	if err := d.ClearOverride("BAT0"); err != nil {
+		t.Fatal(err)
+	}
+	if start, stop := thresholds(t, sim); start != 50 || stop != 60 {
+		t.Errorf("clearing the override did not return to the new band: %d/%d", start, stop)
+	}
+}
+
+func TestOverrideErrors(t *testing.T) {
+	sim := fullSetSim(79)
+	noThresh := battery.NewSim(battery.SimConfig{Capacity: 50, ACOnline: true})
+	set := newFakeSet(map[string]battery.Battery{"BAT0": sim, "BAT1": noThresh})
+	clk := &fakeClock{now: time.Unix(1_000_000, 0), sim: sim}
+	d := newDaemon(t, set, clk, &countInhibitor{})
+
+	bad := []struct {
+		name   string
+		bat    string
+		target int
+		until  time.Time
+		full   bool
+	}{
+		{"target too low", "", 1, time.Time{}, true},
+		{"target too high", "", 101, time.Time{}, true},
+		{"deadline in the past", "", 100, clk.Now().Add(-time.Minute), false},
+		{"unknown pack", "BAT9", 100, time.Time{}, true},
+		{"pack without thresholds", "BAT1", 100, time.Time{}, true},
+	}
+	for _, c := range bad {
+		if err := d.SetOverride(c.bat, c.target, c.until, c.full); err == nil {
+			t.Errorf("%s: SetOverride should error", c.name)
+		}
+	}
+	if err := d.ClearOverride(""); err == nil {
+		t.Errorf("ClearOverride with none active should error")
+	}
+	if err := d.SetOverride("BAT0", 100, time.Time{}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ClearOverride("BAT1"); err == nil {
+		t.Errorf("ClearOverride on a pack without one should error")
+	}
+	if err := d.ClearOverride(""); err != nil {
+		t.Errorf("ClearOverride of all: %v", err)
+	}
+
+	// No band-capable pack at all.
+	only := newDaemon(t, newFakeSet(map[string]battery.Battery{"BAT1": noThresh}), clk, &countInhibitor{})
+	if err := only.SetOverride("", 100, time.Time{}, true); err == nil {
+		t.Errorf("SetOverride with no band-capable pack should error")
+	}
+}
+
+func TestSignedPower(t *testing.T) {
+	if got := signedPower(battery.Reading{Status: battery.StatusDischarging, PowerNowUW: 7}); got != -7 {
+		t.Errorf("discharging power = %d, want -7", got)
+	}
+	if got := signedPower(battery.Reading{Status: battery.StatusCharging, PowerNowUW: 7}); got != 7 {
+		t.Errorf("charging power = %d, want 7", got)
+	}
+}

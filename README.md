@@ -79,7 +79,15 @@ thinkbatt calibrate --battery BAT1 --now # ...name the pack when more than one i
 thinkbatt cancel                         # stop the running calibration (restores the band)
 thinkbatt band 75 80                     # set the resting band at runtime (all packs)
 thinkbatt band --battery BAT1 50 60      # ...or just one pack
+thinkbatt charge full                    # top up to 100% once, then back to the band
+thinkbatt charge full --until 09:00      # hold 100% until 09:00, then back to the band
+thinkbatt charge 90 --until "2026-10-18 09:00"
+thinkbatt charge reset                   # end a charge override now
+thinkbatt status --json                  # machine-readable status
 ```
+
+A charge override survives a reboot, blocks calibration on its pack, and
+cancels one already running there. See the Manual.
 
 With more than one pack present, `calibrate` requires `--battery` rather than
 guessing which pack to drain.

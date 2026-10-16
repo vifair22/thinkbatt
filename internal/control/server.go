@@ -11,6 +11,7 @@ import (
 	"os/user"
 	"strconv"
 	"sync"
+	"time"
 )
 
 // Server accepts control connections on a unix socket and dispatches each to a
@@ -164,6 +165,30 @@ func (s *Server) dispatch(req Request) Response {
 			return errResp(errors.New("band: stop is not an integer"))
 		}
 		if err := s.h.SetBand(req.Args["battery"], start, stop); err != nil {
+			return errResp(err)
+		}
+		return Response{OK: true}
+
+	case CmdCharge:
+		target, err := strconv.Atoi(req.Args["target"])
+		if err != nil {
+			return errResp(errors.New("charge: target is not an integer"))
+		}
+		var until time.Time
+		untilFull := req.Args["until"] == UntilFull
+		if !untilFull {
+			until, err = time.Parse(time.RFC3339, req.Args["until"])
+			if err != nil {
+				return errResp(fmt.Errorf("charge: until %q is neither %q nor an RFC 3339 time", req.Args["until"], UntilFull))
+			}
+		}
+		if err := s.h.SetOverride(req.Args["battery"], target, until, untilFull); err != nil {
+			return errResp(err)
+		}
+		return Response{OK: true}
+
+	case CmdChargeReset:
+		if err := s.h.ClearOverride(req.Args["battery"]); err != nil {
 			return errResp(err)
 		}
 		return Response{OK: true}

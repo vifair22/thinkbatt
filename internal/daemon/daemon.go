@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -78,10 +79,23 @@ type Daemon struct {
 	st          state.State
 	running     bool
 	runningPack string
-	cancel      context.CancelFunc
+	cancel      context.CancelCauseFunc
+	runDone     chan struct{} // closed once the run has unwound and the band is re-asserted
+	engine      *calib.Engine // the running engine, for its phase; nil when idle
 	runReason   string
 	wg          sync.WaitGroup
+
+	// saveMu serialises state snapshots and their writes, so an older snapshot
+	// can never be renamed over a newer one.
+	saveMu sync.Mutex
 }
+
+// Causes recorded as the reason when a calibration is cancelled.
+var (
+	errCancelUser     = errors.New("cancelled by user")
+	errCancelOverride = errors.New("cancelled for a charge override")
+	errCancelShutdown = errors.New("cancelled by daemon shutdown")
+)
 
 // New builds a Daemon and loads any persisted state. It does not touch hardware
 // yet; call Refresh (or Serve, which calls it) to discover packs.
@@ -159,10 +173,20 @@ func (d *Daemon) Refresh() {
 	}
 }
 
-// assertBands puts every present, band-capable pack into its resting band,
-// skipping the pack currently being calibrated (the calibration owns its pack's
-// behaviour until it unwinds). Called at startup and on every maintenance tick,
-// so a freshly docked pack is banded promptly and a firmware reset is undone.
+// bandForLocked is the band a pack should be held at now: its override's target
+// while one is active, otherwise its resting band. The caller holds d.mu.
+func (d *Daemon) bandForLocked(m *managed) (start, stop int) {
+	if o := d.st.Override(m.name); o != nil {
+		return policy.OverrideBand(o.Target)
+	}
+	return m.cfg.BandStart, m.cfg.BandStop
+}
+
+// assertBands puts every present, band-capable pack into the band it should be
+// at (bandForLocked), skipping the pack currently being calibrated (the
+// calibration owns its pack's behaviour until it unwinds). Called at startup, on
+// every maintenance tick, and when a calibration or override ends, so a freshly
+// docked pack is banded promptly and a firmware reset is undone.
 func (d *Daemon) assertBands() {
 	d.mu.Lock()
 	runningPack := d.runningPack
@@ -173,7 +197,8 @@ func (d *Daemon) assertBands() {
 	var todo []band
 	for _, m := range d.packs {
 		if m.profile.CanManageBand() && m.name != runningPack {
-			todo = append(todo, band{m, m.cfg.BandStart, m.cfg.BandStop})
+			start, stop := d.bandForLocked(m)
+			todo = append(todo, band{m, start, stop})
 		}
 	}
 	d.mu.Unlock()
@@ -185,19 +210,68 @@ func (d *Daemon) assertBands() {
 	}
 }
 
-// Maintain is the periodic pass: rediscover packs, re-assert bands, then start a
-// calibration if one pack is due and none is running. Production fires it on a
-// ticker; tests call it directly with a chosen now.
+// Maintain is the periodic pass: rediscover packs, end any override that is
+// over, re-assert bands, then start a calibration if one pack is due and none is
+// running. Production fires it on a ticker; tests call it directly with a chosen
+// now.
 func (d *Daemon) Maintain(now time.Time) {
 	d.Refresh()
+	d.expireOverrides(now)
 	d.assertBands()
 	d.dueCheck(now)
+}
+
+// expireOverrides drops every override that has ended. A deadline override ends
+// whether or not its pack is present, so one set on a since-pulled pack does not
+// linger; an until-full override needs a reading, so it waits for its pack.
+// The caller re-asserts bands afterwards, which returns the pack to its resting
+// band.
+func (d *Daemon) expireOverrides(now time.Time) {
+	d.mu.Lock()
+	ended := false
+	for name, o := range d.st.Overrides {
+		var r battery.Reading
+		if o.UntilFull {
+			m, ok := d.packs[name]
+			if !ok {
+				continue
+			}
+			var err error
+			if r, err = m.bat.Read(); err != nil {
+				d.log.Warn("override check: battery read failed", "pack", name, "err", err)
+				continue
+			}
+		}
+		if done, why := policy.OverrideEnded(*o, r, now); done {
+			d.st.SetOverride(name, nil)
+			ended = true
+			d.log.Info("charge override ended", "pack", name, "target", o.Target, "reason", why)
+		}
+	}
+	d.mu.Unlock()
+	if ended {
+		d.persist()
+	}
+}
+
+// persist saves a snapshot of the state. Errors are logged, not returned: the
+// in-memory state stays authoritative and the next change retries the write.
+func (d *Daemon) persist() {
+	d.saveMu.Lock()
+	defer d.saveMu.Unlock()
+	d.mu.Lock()
+	st := d.st.Clone()
+	d.mu.Unlock()
+	if err := state.Save(d.statePath, st); err != nil {
+		d.log.Error("save state failed", "err", err)
+	}
 }
 
 // dueCheck starts a calibration on the first pack (in name order) that is
 // enabled, capable, and due, provided none is already running. One at a time:
 // the force-discharge assist and the sleep inhibitor are shared, and two packs
-// cannot sensibly force-discharge at once.
+// cannot sensibly force-discharge at once. A pack under a charge override is
+// skipped: draining it to the floor is the opposite of what the override asked.
 func (d *Daemon) dueCheck(now time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -206,7 +280,7 @@ func (d *Daemon) dueCheck(now time.Time) {
 	}
 	for _, name := range d.sortedNamesLocked() {
 		m := d.packs[name]
-		if !m.cfg.CalibEnabled || !m.profile.CanCalibrate() {
+		if !m.cfg.CalibEnabled || !m.profile.CanCalibrate() || d.st.Override(name) != nil {
 			continue
 		}
 		r, err := m.bat.Read()
@@ -237,6 +311,9 @@ func (d *Daemon) Calibrate(batteryName string, now bool) error {
 	}
 	if !m.profile.CanCalibrate() {
 		return fmt.Errorf("pack %s cannot calibrate: %s", m.name, m.profile.Summary())
+	}
+	if d.st.Override(m.name) != nil {
+		return fmt.Errorf("pack %s has a charge override; clear it first with `thinkbatt charge reset`", m.name)
 	}
 	if !now {
 		r, err := m.bat.Read()
@@ -289,10 +366,11 @@ func (d *Daemon) sortedNamesLocked() []string {
 // startLocked launches the calibration goroutine against pack m. The caller
 // holds d.mu.
 func (d *Daemon) startLocked(m *managed, reason string) {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	d.running = true
 	d.runningPack = m.name
 	d.cancel = cancel
+	d.runDone = make(chan struct{})
 	d.runReason = reason
 	d.wg.Add(1)
 	d.log.Info("calibration starting", "pack", m.name, "reason", reason)
@@ -306,12 +384,13 @@ func (d *Daemon) startLocked(m *managed, reason string) {
 		ChargeTimeout:    time.Duration(m.cfg.ChargeTimeoutHours) * time.Hour,
 		DischargeTimeout: time.Duration(m.cfg.DischargeTimeoutHours) * time.Hour,
 	}
-	go d.run(ctx, cancel, m, params)
+	go d.run(ctx, cancel, d.runDone, m, params)
 }
 
-func (d *Daemon) run(ctx context.Context, cancel context.CancelFunc, m *managed, params calib.Params) {
+func (d *Daemon) run(ctx context.Context, cancel context.CancelCauseFunc, done chan struct{}, m *managed, params calib.Params) {
 	defer d.wg.Done()
-	defer cancel()
+	defer close(done)
+	defer cancel(nil)
 
 	release, err := d.inhibitor.Inhibit("battery calibration (" + m.name + ")")
 	if err != nil {
@@ -327,6 +406,9 @@ func (d *Daemon) run(ctx context.Context, cancel context.CancelFunc, m *managed,
 
 	started := d.clock.Now()
 	engine := calib.New(m.bat, d.clock, d.log, params, assist)
+	d.mu.Lock()
+	d.engine = engine
+	d.mu.Unlock()
 	res, runErr := engine.Run(ctx)
 
 	rec := state.Calibration{
@@ -351,19 +433,22 @@ func (d *Daemon) run(ctx context.Context, cancel context.CancelFunc, m *managed,
 	// observable as finished its result is already durable on disk.
 	d.mu.Lock()
 	d.st.SetLast(m.name, &rec)
-	st := d.st
 	d.mu.Unlock()
-
-	if err := state.Save(d.statePath, st); err != nil {
-		d.log.Error("save state failed", "err", err)
-	}
+	d.persist()
 
 	d.mu.Lock()
 	d.running = false
 	d.runningPack = ""
 	d.cancel = nil
+	d.runDone = nil
+	d.engine = nil
 	d.runReason = ""
 	d.mu.Unlock()
+
+	// The engine restored the band it was started with; re-assert now so a band
+	// changed during the run, or an override that cancelled it, applies at once
+	// rather than on the next tick.
+	d.assertBands()
 }
 
 // Cancel stops the running calibration; the engine restores that pack's resting
@@ -375,14 +460,16 @@ func (d *Daemon) Cancel() error {
 	if cancel == nil {
 		return fmt.Errorf("no calibration is running")
 	}
-	cancel()
+	cancel(errCancelUser)
 	return nil
 }
 
 // SetBand changes the resting band at runtime and re-asserts it. An empty
 // battery name applies to every present band-capable pack; a name targets one.
 // It is not persisted; edit the config for a permanent change. A pack being
-// calibrated keeps its new band in memory and the calibration re-bands on exit.
+// calibrated keeps its new band in memory and gets it when the run ends. A pack
+// under a charge override keeps the override and returns to the new band when
+// it ends.
 func (d *Daemon) SetBand(batteryName string, start, stop int) error {
 	if start < 1 || start > 99 || stop < 2 || stop > 100 || start >= stop {
 		return fmt.Errorf("band %d/%d invalid: need 1 <= start < stop <= 100", start, stop)
@@ -409,21 +496,133 @@ func (d *Daemon) SetBand(batteryName string, start, stop int) error {
 		return fmt.Errorf("no band-capable pack to set")
 	}
 	runningPack := d.runningPack
+	type band struct {
+		m           *managed
+		start, stop int
+	}
+	var todo []band
 	for _, m := range targets {
 		m.cfg.BandStart, m.cfg.BandStop = start, stop
+		if m.name == runningPack {
+			continue // the run re-asserts bands when it ends
+		}
+		bs, be := d.bandForLocked(m)
+		todo = append(todo, band{m, bs, be})
 	}
 	d.mu.Unlock()
 
 	var firstErr error
-	for _, m := range targets {
-		if m.name == runningPack {
-			continue // the running calibration re-bands to the new values on exit
-		}
-		if err := policy.AssertBand(m.bat, start, stop); err != nil && firstErr == nil {
+	for _, b := range todo {
+		if err := policy.AssertBand(b.m.bat, b.start, b.stop); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// bandTargetsLocked resolves a battery name to the packs a band-level command
+// acts on: every present band-capable pack for an empty name, or the named pack,
+// which must be present and band-capable. The caller holds d.mu.
+func (d *Daemon) bandTargetsLocked(batteryName string) ([]*managed, error) {
+	if batteryName == "" {
+		var targets []*managed
+		for _, name := range d.sortedNamesLocked() {
+			if d.packs[name].profile.CanManageBand() {
+				targets = append(targets, d.packs[name])
+			}
+		}
+		if len(targets) == 0 {
+			return nil, fmt.Errorf("no band-capable pack present")
+		}
+		return targets, nil
+	}
+	m, ok := d.packs[batteryName]
+	if !ok {
+		return nil, fmt.Errorf("no such pack %q; present: %s", batteryName, strings.Join(d.sortedNamesLocked(), ", "))
+	}
+	if !m.profile.CanManageBand() {
+		return nil, fmt.Errorf("pack %s has no charge thresholds to override", m.name)
+	}
+	return []*managed{m}, nil
+}
+
+// SetOverride holds packs at target until the deadline, or until full when
+// untilFull is set, replacing any override they already had. An empty battery
+// name applies to every present band-capable pack. A calibration running on an
+// affected pack is cancelled first and waited out, so the engine's own restore
+// of the resting band cannot land after the override and undo it. The override
+// is persisted, so it survives a restart.
+func (d *Daemon) SetOverride(batteryName string, target int, until time.Time, untilFull bool) error {
+	if target < 2 || target > 100 {
+		return fmt.Errorf("charge target %d%% invalid: need 2-100", target)
+	}
+	now := d.clock.Now()
+	if !untilFull && !until.After(now) {
+		return fmt.Errorf("charge override deadline %s is not in the future", until.Format("2006-01-02 15:04"))
+	}
+
+	d.mu.Lock()
+	targets, err := d.bandTargetsLocked(batteryName)
+	if err != nil {
+		d.mu.Unlock()
+		return err
+	}
+	var cancel context.CancelCauseFunc
+	var done chan struct{}
+	for _, m := range targets {
+		o := &state.Override{Target: target, UntilFull: untilFull, SetAt: now}
+		if !untilFull {
+			o.Until = until
+		}
+		d.st.SetOverride(m.name, o)
+		if d.running && d.runningPack == m.name {
+			cancel, done = d.cancel, d.runDone
+		}
+		d.log.Info("charge override set", "pack", m.name, "target", target,
+			"until", overrideUntil(o))
+	}
+	d.mu.Unlock()
+
+	if cancel != nil {
+		cancel(errCancelOverride)
+		<-done
+	}
+	d.persist()
+	d.assertBands()
+	return nil
+}
+
+// ClearOverride ends overrides early. An empty battery name clears every
+// override; a name clears that pack's, which must have one.
+func (d *Daemon) ClearOverride(batteryName string) error {
+	d.mu.Lock()
+	switch {
+	case batteryName == "" && len(d.st.Overrides) == 0:
+		d.mu.Unlock()
+		return fmt.Errorf("no charge override is active")
+	case batteryName == "":
+		for name := range d.st.Overrides {
+			d.st.SetOverride(name, nil)
+		}
+	case d.st.Override(batteryName) == nil:
+		d.mu.Unlock()
+		return fmt.Errorf("pack %s has no charge override", batteryName)
+	default:
+		d.st.SetOverride(batteryName, nil)
+	}
+	d.mu.Unlock()
+	d.log.Info("charge override cleared", "pack", batteryName)
+
+	d.persist()
+	d.assertBands()
+	return nil
+}
+
+func overrideUntil(o *state.Override) string {
+	if o.UntilFull {
+		return "full"
+	}
+	return o.Until.Format(time.RFC3339)
 }
 
 // Status gathers a per-pack snapshot for the control socket.
@@ -436,10 +635,11 @@ func (d *Daemon) Status() (control.StatusInfo, error) {
 	}
 	running := d.running
 	runningPack := d.runningPack
-	lasts := make(map[string]*state.Calibration, len(names))
-	for _, n := range names {
-		lasts[n] = d.st.Last(n)
+	phase := ""
+	if d.engine != nil {
+		phase = d.engine.Phase()
 	}
+	snap := d.st.Clone()
 	d.mu.Unlock()
 
 	info := control.StatusInfo{}
@@ -460,14 +660,29 @@ func (d *Daemon) Status() (control.StatusInfo, error) {
 			BandStart:           m.cfg.BandStart,
 			BandStop:            m.cfg.BandStop,
 			HasThresholds:       m.profile.HasThresholds,
+			PowerUW:             signedPower(r),
+			VoltageUV:           r.VoltageNowUV,
 			EnergyFullUWh:       r.EnergyFullUWh,
 			EnergyFullDesignUWh: r.EnergyFullDesignUWh,
 			CapsSummary:         m.profile.Summary(),
 			CalibrationRunning:  running && runningPack == m.name,
-			LastCalibration:     lasts[m.name],
+			LastCalibration:     snap.Last(m.name),
+			Override:            snap.Override(m.name),
 		})
+		if running && runningPack == m.name {
+			info.Packs[len(info.Packs)-1].CalibrationPhase = phase
+		}
 	}
 	return info, nil
+}
+
+// signedPower turns the reading's power magnitude into a flow into the pack:
+// negative when discharging, so a client need not interpret Status for it.
+func signedPower(r battery.Reading) int64 {
+	if r.Status == battery.StatusDischarging {
+		return -r.PowerNowUW
+	}
+	return r.PowerNowUW
 }
 
 // Server is the control surface Serve drives: control.Server satisfies it.
@@ -505,7 +720,7 @@ func (d *Daemon) Serve(ctx context.Context, srv Server, ticks <-chan time.Time, 
 func (d *Daemon) Shutdown() {
 	d.mu.Lock()
 	if d.cancel != nil {
-		d.cancel()
+		d.cancel(errCancelShutdown)
 	}
 	d.mu.Unlock()
 	d.wg.Wait()

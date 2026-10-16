@@ -16,11 +16,17 @@ import (
 
 // Command names.
 const (
-	CmdStatus    = "status"
-	CmdCalibrate = "calibrate"
-	CmdCancel    = "cancel"
-	CmdBand      = "band"
+	CmdStatus      = "status"
+	CmdCalibrate   = "calibrate"
+	CmdCancel      = "cancel"
+	CmdBand        = "band"
+	CmdCharge      = "charge"
+	CmdChargeReset = "charge-reset"
 )
+
+// UntilFull is the "until" argument of a charge request that ends once the pack
+// is full rather than at a deadline. Any other value is an RFC 3339 deadline.
+const UntilFull = "full"
 
 // Request is a single command from the CLI.
 type Request struct {
@@ -37,18 +43,27 @@ type Response struct {
 
 // PackStatus is the state of one battery pack.
 type PackStatus struct {
-	Name                string             `json:"name"`
-	Capacity            int                `json:"capacity"`
-	Status              string             `json:"status"`
-	BehaviourActive     string             `json:"behaviour_active"`
-	BandStart           int                `json:"band_start"`
-	BandStop            int                `json:"band_stop"`
-	HasThresholds       bool               `json:"has_thresholds"`
+	Name            string `json:"name"`
+	Capacity        int    `json:"capacity"`
+	Status          string `json:"status"`
+	BehaviourActive string `json:"behaviour_active"`
+	BandStart       int    `json:"band_start"`
+	BandStop        int    `json:"band_stop"`
+	HasThresholds   bool   `json:"has_thresholds"`
+	// PowerUW is the power into the pack, microwatts: positive while charging,
+	// negative while discharging. VoltageUV is the pack voltage, microvolts.
+	PowerUW             int64              `json:"power_uw"`
+	VoltageUV           int64              `json:"voltage_uv"`
 	EnergyFullUWh       int64              `json:"energy_full_uwh"`
 	EnergyFullDesignUWh int64              `json:"energy_full_design_uwh"`
 	CapsSummary         string             `json:"caps_summary"`
 	CalibrationRunning  bool               `json:"calibration_running"`
+	CalibrationPhase    string             `json:"calibration_phase,omitempty"`
 	LastCalibration     *state.Calibration `json:"last_calibration,omitempty"`
+	// Override is the active charge override, if any. While it is set the pack
+	// is held at its target instead of BandStart/BandStop, which stay the
+	// resting band it returns to.
+	Override *state.Override `json:"override,omitempty"`
 }
 
 // StatusInfo is the payload of a status response: one entry per present pack.
@@ -65,6 +80,12 @@ type Handler interface {
 	Calibrate(battery string, now bool) error
 	Cancel() error
 	SetBand(battery string, start, stop int) error
+	// SetOverride holds a pack (or every band-capable pack) at target until the
+	// deadline, or until it is full when untilFull is set. It cancels a
+	// calibration running on an affected pack.
+	SetOverride(battery string, target int, until time.Time, untilFull bool) error
+	// ClearOverride ends a pack's override (or every override) early.
+	ClearOverride(battery string) error
 }
 
 // Client dials the daemon socket for one command.

@@ -37,7 +37,7 @@ type Reading struct {
 	EnergyFullUWh       int64 // the gauge's learned full-charge capacity (FCC)
 	EnergyFullDesignUWh int64
 	VoltageNowUV        int64
-	PowerNowUW          int64 // instantaneous power in/out of the pack, microwatts
+	PowerNowUW          int64 // instantaneous power in or out of the pack, microwatts; a magnitude, Status gives the direction
 	CycleCount          int
 	ACOnline            bool
 }

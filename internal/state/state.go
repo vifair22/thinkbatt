@@ -33,11 +33,64 @@ type Calibration struct {
 	EnergyFullAfterUWh  int64     `json:"energy_full_after_uwh"`
 }
 
+// Override is a temporary charge target that replaces a pack's resting band
+// until it ends: at a wall-clock deadline (Until), or once the pack has charged
+// to the target (UntilFull). It is persisted so a "full until tomorrow morning"
+// survives a reboot. Exactly one of Until and UntilFull is set.
+type Override struct {
+	Target    int       `json:"target"` // percent; the pack charges to this
+	Until     time.Time `json:"until,omitzero"`
+	UntilFull bool      `json:"until_full,omitempty"`
+	SetAt     time.Time `json:"set_at"`
+}
+
 // State is the whole persisted record. Calibration is tracked per pack, keyed
 // by the kernel battery name (BAT0, BAT1, ...), so a machine with more than one
-// pack remembers each one's last run independently.
+// pack remembers each one's last run independently. Overrides are keyed the
+// same way.
 type State struct {
 	LastCalibrations map[string]*Calibration `json:"last_calibrations,omitempty"`
+	Overrides        map[string]*Override    `json:"overrides,omitempty"`
+}
+
+// Clone returns a deep copy, so a snapshot taken under the daemon's lock can be
+// encoded and saved after the lock is released without racing later changes.
+func (s State) Clone() State {
+	c := State{
+		LastCalibrations: make(map[string]*Calibration, len(s.LastCalibrations)),
+		Overrides:        make(map[string]*Override, len(s.Overrides)),
+	}
+	for k, v := range s.LastCalibrations {
+		if v != nil {
+			cp := *v
+			c.LastCalibrations[k] = &cp
+		}
+	}
+	for k, v := range s.Overrides {
+		if v != nil {
+			cp := *v
+			c.Overrides[k] = &cp
+		}
+	}
+	return c
+}
+
+// Override returns a pack's active charge override, or nil if it has none.
+func (s State) Override(pack string) *Override {
+	return s.Overrides[pack]
+}
+
+// SetOverride records a pack's charge override, allocating the map on first
+// use. A nil override clears it.
+func (s *State) SetOverride(pack string, o *Override) {
+	if o == nil {
+		delete(s.Overrides, pack)
+		return
+	}
+	if s.Overrides == nil {
+		s.Overrides = map[string]*Override{}
+	}
+	s.Overrides[pack] = o
 }
 
 // Last returns the last calibration recorded for a pack, or nil if it has never
@@ -67,12 +120,13 @@ func Load(path string) (State, error) {
 	}
 	var raw struct {
 		LastCalibrations map[string]*Calibration `json:"last_calibrations"`
+		Overrides        map[string]*Override    `json:"overrides"`
 		LastCalibration  *Calibration            `json:"last_calibration"` // pre-0.2 single-pack
 	}
 	if err := json.Unmarshal(b, &raw); err != nil {
 		return State{}, fmt.Errorf("parse state %s: %w", path, err)
 	}
-	s := State{LastCalibrations: raw.LastCalibrations}
+	s := State{LastCalibrations: raw.LastCalibrations, Overrides: raw.Overrides}
 	if s.LastCalibrations == nil {
 		s.LastCalibrations = map[string]*Calibration{}
 	}
