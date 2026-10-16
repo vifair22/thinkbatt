@@ -10,6 +10,12 @@
 # package registry. The sys-power/thinkbatt ebuild in vifair-overlay fetches
 # that tarball as its SRC_URI, so a release is how a new version reaches the
 # fleet binhost.
+#
+# The plasmoid (QML) has its own test and analyze jobs in a Fedora image: they
+# need Qt's qmltestrunner and qmllint plus Plasma's QML modules to resolve
+# imports against, and Debian's Plasma packages do not install
+# org.kde.plasma.plasmoid or org.kde.plasma.configuration as modules at all.
+# Fedora packages them the way upstream installs them.
 
 stages:
   - test
@@ -24,6 +30,12 @@ variables:
   # Pinned: a tool release must not be able to red an unrelated change.
   GOLANGCI_VERSION: v2.12.2
   GOTESTSUM_VERSION: v1.13.0
+  PLASMOID_IMAGE: fedora:42
+  # What the plasmoid jobs install: the Qt tools, and every QML module the
+  # plasmoid imports, so qmllint resolves each import rather than skipping it.
+  PLASMOID_PACKAGES: >-
+    make python3 qt6-qtdeclarative-devel libplasma plasma5support
+    kf6-kirigami kf6-kcmutils
   COVERAGE_MIN: "80"
 
 default:
@@ -48,6 +60,19 @@ test:go:
       junit: build/junit/go.junit.xml
     expire_in: 1 week
 
+test:plasmoid:
+  stage: test
+  image: $PLASMOID_IMAGE
+  before_script:
+    - dnf -q -y install --setopt=install_weak_deps=False $PLASMOID_PACKAGES
+  script:
+    - make test-plasmoid-junit
+  artifacts:
+    when: always
+    reports:
+      junit: build/junit/plasmoid.junit.xml
+    expire_in: 1 week
+
 #-------------------------------------------------------------------------------
 # analyze
 
@@ -65,6 +90,15 @@ analyze:go:
   script:
     - go vet ./...
     - golangci-lint run ./...
+
+analyze:plasmoid:
+  stage: analyze
+  image: $PLASMOID_IMAGE
+  needs: ["test:plasmoid"]
+  before_script:
+    - dnf -q -y install --setopt=install_weak_deps=False $PLASMOID_PACKAGES
+  script:
+    - make lint-plasmoid
 
 #-------------------------------------------------------------------------------
 # coverage
@@ -91,9 +125,11 @@ build:bins:
     - make
     - ./build/bin/thinkbattd -version
     - ./build/bin/thinkbatt version
+    - make plasmoid
   artifacts:
     paths:
       - build/bin/
+      - build/plasmoid/
     expire_in: 4 weeks
 
 #-------------------------------------------------------------------------------

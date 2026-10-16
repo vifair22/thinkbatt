@@ -254,6 +254,45 @@ Supervise the first run on a machine: trigger it with `thinkbatt calibrate
 confirm the pack returns to the band at the end. Confirm `thinkbatt cancel` and
 `systemctl stop thinkbattd` each restore the band immediately.
 
+## Plasma tray plasmoid
+
+`net.airies.thinkbatt` is a KDE Plasma 6 system-tray entry. Its icon follows
+the first pack's charge, with a badge when a pack is not simply resting in its
+band: an arrow for a charge override, a refresh mark for a running
+calibration, a warning when the daemon cannot be reached. The tooltip has a
+line per pack.
+
+The popup shows, per pack:
+
+- charge, status, and a bar with the band the pack is held at drawn over it
+  (green for the resting band, the attention colour for an override)
+- power in or out of the pack and its voltage
+- health: the learned full-charge capacity against design
+- the band, and the resting band behind an override
+- calibration: the running phase, or the last run
+- the charge-override form: a target (50% to full) and how it ends, which is
+  until full, at a time (its next occurrence), or at a date and time picked from
+  a calendar; or, with one active, what it is and a "Back to band" button
+- "Calibrate now...", which asks for confirmation first, and "Cancel
+  calibration" while one runs
+
+It does not speak the control protocol itself. It runs the `thinkbatt` CLI
+(`status --json` every 3 s while open, every 30 s while closed, and the same
+commands as the CLI for every action), so it needs exactly what the CLI needs:
+the user must be able to reach the control socket. Errors from an action are
+shown inline as the CLI printed them.
+
+The command it runs is a setting (right-click -> Configure), `thinkbatt` by
+default. It goes through a shell, so it can carry a path or an environment
+prefix, which is how to point it at a development build:
+
+```
+env THINKBATT_SOCKET=/run/thinkbattd-test/control.sock ~/git/home/thinkbatt/build/bin/thinkbatt
+```
+
+For a quick look without adding it to the panel, `plasmawindowed
+net.airies.thinkbatt` runs it in a window.
+
 ## Troubleshooting
 
 - **`thinkbatt status` cannot connect** - the daemon is not running, or the
@@ -269,3 +308,6 @@ confirm the pack returns to the band at the end. Confirm `thinkbatt cancel` and
   threshold it read at login. Cosmetic; see Desktop charge limit settings.
 - **`calibrate` refused with "has a charge override"** - clear it with
   `thinkbatt charge reset` first.
+- **Plasmoid shows "Cannot reach thinkbattd"** - the same as the CLI failing:
+  check the daemon is running and that the user is in `socket_group`. An error
+  mentioning `--json` means the installed CLI predates 0.3.0.

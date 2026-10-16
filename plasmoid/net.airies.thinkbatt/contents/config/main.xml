@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<kcfg xmlns="http://www.kde.org/standards/kcfg/1.0"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0
+                          http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
+  <kcfgfile name=""/>
+  <group name="General">
+    <!-- The CLI the plasmoid runs. Normally just the installed thinkbatt; a
+         developer can point it at a build tree or a test socket, e.g.
+         "env THINKBATT_SOCKET=/run/thinkbattd-test/control.sock ~/git/home/thinkbatt/build/bin/thinkbatt". -->
+    <entry name="command" type="String">
+      <default>thinkbatt</default>
+    </entry>
+  </group>
+</kcfg>

@@ -10,6 +10,16 @@
 # make check      ascii-check over the tracked tree
 # make install    install both binaries into $(PREFIX)/bin
 # make clean      remove build/
+#
+# The KDE Plasma plasmoid (plasmoid/) is separate, since it needs Qt and Plasma
+# rather than Go:
+#
+# make plasmoid           stage the package, version-stamped, in build/plasmoid/
+# make test-plasmoid      qmltestrunner over plasmoid/tests (logic.js)
+# make test-plasmoid-junit  the same, as JUnit XML in build/junit/ (for CI)
+# make lint-plasmoid      qmllint, ignoring the i18n() Plasma injects at runtime
+# make install-plasmoid   install into $(PREFIX)/share/plasma/plasmoids
+# make dev-plasmoid       install or upgrade it for this user with kpackagetool6
 
 SHELL       := /bin/bash
 .SHELLFLAGS := -o pipefail -c
@@ -38,10 +48,18 @@ endif
 DAEMON_BIN := $(BIN_DIR)/thinkbattd
 CLI_BIN    := $(BIN_DIR)/thinkbatt
 
+PLASMOID_ID   := net.airies.thinkbatt
+PLASMOID_SRC  := plasmoid/$(PLASMOID_ID)
+PLASMOID_DIR  := $(BUILD_DIR)/plasmoid/$(PLASMOID_ID)
+PLASMOID_QML  := $(wildcard $(PLASMOID_SRC)/contents/ui/*.qml $(PLASMOID_SRC)/contents/config/*.qml)
+# Qt's developer tools are not on PATH on Gentoo; override for other layouts.
+QT_TOOLS      ?= /usr/lib64/qt6/bin
+
 .DEFAULT_GOAL := all
 # The build targets are phony: go build is itself incremental and the correct
 # arbiter of staleness, so always invoke it rather than tracking sources here.
 .PHONY: all test coverage analyze check install uninstall clean version \
+        plasmoid test-plasmoid test-plasmoid-junit lint-plasmoid install-plasmoid uninstall-plasmoid dev-plasmoid \
         $(DAEMON_BIN) $(CLI_BIN)
 
 all: $(DAEMON_BIN) $(CLI_BIN)
@@ -85,6 +103,38 @@ install: all
 
 uninstall:
 	rm -f $(DESTDIR)$(PREFIX)/bin/thinkbattd $(DESTDIR)$(PREFIX)/bin/thinkbatt
+
+plasmoid:
+	rm -rf $(PLASMOID_DIR)
+	mkdir -p $(dir $(PLASMOID_DIR))
+	cp -r $(PLASMOID_SRC) $(PLASMOID_DIR)
+	sed -i 's/@VERSION@/$(VERSION)/' $(PLASMOID_DIR)/metadata.json
+
+test-plasmoid:
+	QT_QPA_PLATFORM=offscreen $(QT_TOOLS)/qmltestrunner -input plasmoid/tests
+
+# JUnit replaces the readable report, so CI gets its own target and local runs
+# keep the plain one.
+test-plasmoid-junit:
+	mkdir -p $(BUILD_DIR)/junit
+	QT_QPA_PLATFORM=offscreen $(QT_TOOLS)/qmltestrunner -input plasmoid/tests \
+	    -o $(BUILD_DIR)/junit/plasmoid.junit.xml,junitxml
+
+# qmllint exits non-zero on the i18n false positives too, so its status is
+# dropped and the filter's (non-zero when a real finding is left) is the result.
+lint-plasmoid:
+	{ $(QT_TOOLS)/qmllint $(PLASMOID_QML) 2>&1 || true; } | python3 -I plasmoid/tools/qmllint-filter.py
+
+install-plasmoid: plasmoid
+	install -d $(DESTDIR)$(PREFIX)/share/plasma/plasmoids
+	cp -r $(PLASMOID_DIR) $(DESTDIR)$(PREFIX)/share/plasma/plasmoids/
+
+uninstall-plasmoid:
+	rm -rf $(DESTDIR)$(PREFIX)/share/plasma/plasmoids/$(PLASMOID_ID)
+
+dev-plasmoid: plasmoid
+	kpackagetool6 --type Plasma/Applet --upgrade $(PLASMOID_DIR) >/dev/null 2>&1 || \
+	    kpackagetool6 --type Plasma/Applet --install $(PLASMOID_DIR)
 
 clean:
 	rm -rf $(BUILD_DIR)

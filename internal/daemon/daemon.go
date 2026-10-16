@@ -611,7 +611,11 @@ func (d *Daemon) ClearOverride(batteryName string) error {
 		d.st.SetOverride(batteryName, nil)
 	}
 	d.mu.Unlock()
-	d.log.Info("charge override cleared", "pack", batteryName)
+	cleared := batteryName
+	if cleared == "" {
+		cleared = "all"
+	}
+	d.log.Info("charge override cleared", "pack", cleared)
 
 	d.persist()
 	d.assertBands()

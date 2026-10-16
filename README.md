@@ -41,6 +41,7 @@ the Manual).
 | `internal/control/` | the unix-socket control protocol |
 | `internal/daemon/` | orchestration behind the socket |
 | `internal/state/` | persisted calibration history |
+| `plasmoid/` | the KDE Plasma system-tray plasmoid (QML), its logic tests, and a qmllint filter |
 | `packaging/` | the systemd unit and the example config |
 | `Manual.md` | operational manual: the cycle, safety, config, CLI, troubleshooting |
 
@@ -56,6 +57,15 @@ make check      # ascii-check
 
 Go 1.26, standard toolchain, no third-party dependencies.
 
+The plasmoid needs Qt 6 and Plasma 6 instead of Go:
+
+```sh
+make plasmoid         # stage it, version-stamped, in build/plasmoid/
+make test-plasmoid    # qmltestrunner over the logic tests
+make lint-plasmoid    # qmllint
+make dev-plasmoid     # install or upgrade it for the current user
+```
+
 ## Install
 
 ```sh
@@ -65,6 +75,16 @@ sudo install -Dm644 packaging/systemd/thinkbattd.service \
     /etc/systemd/system/thinkbattd.service
 sudo systemctl enable --now thinkbattd
 ```
+
+The tray plasmoid, system-wide:
+
+```sh
+sudo make install-plasmoid PREFIX=/usr     # into /usr/share/plasma/plasmoids
+```
+
+Then enable it under System Tray Settings -> Entries -> thinkbatt. It runs the
+`thinkbatt` CLI as the logged-in user, so set `socket_group` in
+`thinkbatt.ini` to a group that user is in.
 
 On a machine where thinkbatt owns the band, remove any older charge-threshold
 udev rule (e.g. the thinkpad-t430 `80-t430-battery.rules`) so the two do not

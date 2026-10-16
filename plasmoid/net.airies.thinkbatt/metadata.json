@@ -1,0 +1,22 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Email": "vifair22@gmail.com",
+                "Name": "Vincent Fairfield"
+            }
+        ],
+        "Category": "System Information",
+        "Description": "Battery charge band, timed charge overrides and fuel-gauge calibration, from thinkbattd",
+        "Icon": "battery-good",
+        "Id": "net.airies.thinkbatt",
+        "License": "GPL-3.0-or-later",
+        "Name": "thinkbatt",
+        "Version": "@VERSION@",
+        "Website": "https://git.airies.net/vifair22/thinkbatt"
+    },
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "Hardware"
+}
