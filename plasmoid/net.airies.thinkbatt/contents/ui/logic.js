@@ -350,3 +350,82 @@ function describeBlocked(what) {
 function policyCall(member, args, signature) {
     return { service: POLICY_SERVICE, path: POLICY_PATH, iface: POLICY_IFACE, member: member, arguments: args, signature: signature };
 }
+
+// Calibrations ended by the user's own hand (a cancel, or an override that
+// displaced it) are not news to them, so they raise no notification.
+var QUIET_CALIBRATION_REASONS = ["cancelled by user", "cancelled for a charge override"];
+
+function overrideKey(o) {
+    return o ? o.target + "|" + (o.until_full ? "full" : o.until) + "|" + o.set_at : "";
+}
+
+// diffEvents compares the packs in a status against what the plasmoid saw
+// last, and returns the events worth a notification plus the record to keep.
+// seen maps a pack name to {override, calibration}: the override's key and the
+// last calibration's finish time. It is persisted, so an override that ended
+// while the plasmoid was not running (suspended, logged out) is still reported
+// on the first status after. A pack seen for the first time only seeds the
+// record, and a pack missing from this status keeps its entry for its return.
+// quiet names packs whose override the user just ended from the popup.
+function diffEvents(seen, packs, quiet) {
+    var next = {};
+    var events = [];
+    var name;
+    for (name in seen) {
+        next[name] = seen[name];
+    }
+    for (var i = 0; i < packs.length; i++) {
+        var p = packs[i];
+        var lc = p.last_calibration;
+        var rec = { override: overrideKey(p.override), calibration: lc ? lc.finished_at : "" };
+        var prev = seen[p.name];
+        next[p.name] = rec;
+        if (!prev) {
+            continue;
+        }
+        if (prev.override !== "" && rec.override === "" && !(quiet && quiet[p.name])) {
+            events.push({ kind: "override-ended", pack: p.name, target: Number(prev.override.split("|")[0]),
+                          bandStart: p.band_start, bandStop: p.band_stop });
+        }
+        if (lc && rec.calibration !== prev.calibration && QUIET_CALIBRATION_REASONS.indexOf(lc.reason) < 0) {
+            events.push({ kind: "calibration-ended", pack: p.name, outcome: lc.outcome, reason: lc.reason || "",
+                          fullBefore: lc.energy_full_before_uwh || 0, fullAfter: lc.energy_full_after_uwh || 0 });
+        }
+    }
+    return { events: events, seen: next };
+}
+
+// parseSeen reads the persisted record, treating anything unreadable as empty
+// (which only means the next status seeds it again).
+function parseSeen(text) {
+    try {
+        var v = JSON.parse(text || "{}");
+        return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+    } catch (e) {
+        return {};
+    }
+}
+
+// notificationFor turns a diffEvents event into the notification's title,
+// body and icon.
+function notificationFor(ev) {
+    if (ev.kind === "override-ended") {
+        return {
+            title: "Charge override ended",
+            text: ev.pack + " is back to its " + ev.bandStart + "-" + ev.bandStop + "% resting band after charging to " + ev.target + "%.",
+            icon: "battery-good",
+        };
+    }
+    if (ev.outcome === "ok") {
+        var text = ev.pack + " finished its learning cycle.";
+        if (ev.fullBefore > 0 && ev.fullAfter > 0) {
+            text += " Gauge full " + formatWh(ev.fullBefore) + " -> " + formatWh(ev.fullAfter) + ".";
+        }
+        return { title: "Calibration finished", text: text, icon: "battery-full" };
+    }
+    return {
+        title: ev.outcome === "failed" ? "Calibration failed" : "Calibration stopped",
+        text: ev.pack + ": " + (ev.reason || ev.outcome) + ". The pack is back in its resting band.",
+        icon: "dialog-warning",
+    };
+}

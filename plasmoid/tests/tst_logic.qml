@@ -227,4 +227,70 @@ TestCase {
         compare(m.member, "ReleaseInhibition");
         compare(m.signature, "(u)");
     }
+
+    function pack(name, override, lc) {
+        return { name: name, band_start: 75, band_stop: 80, override: override, last_calibration: lc };
+    }
+
+    function test_diffEventsOverride() {
+        var ov = { target: 100, until_full: true, set_at: "2026-10-16T09:00:00Z" };
+        var first = Logic.diffEvents({}, [pack("BAT0", ov, null)], {});
+        compare(first.events, [], "first sight only seeds");
+
+        var ended = Logic.diffEvents(first.seen, [pack("BAT0", null, null)], {});
+        compare(ended.events.length, 1);
+        compare(ended.events[0].kind, "override-ended");
+        compare(ended.events[0].target, 100);
+        compare(Logic.diffEvents(ended.seen, [pack("BAT0", null, null)], {}).events, [], "reported once");
+
+        var quiet = Logic.diffEvents(first.seen, [pack("BAT0", null, null)], { BAT0: true });
+        compare(quiet.events, [], "the user's own reset is quiet");
+
+        var missing = Logic.diffEvents(first.seen, [], {});
+        compare(missing.events, []);
+        verify(missing.seen.BAT0 !== undefined, "a missing pack keeps its record");
+    }
+
+    function test_diffEventsCalibration() {
+        var before = Logic.diffEvents({}, [pack("BAT0", null, null)], {}).seen;
+        var ok = { finished_at: "2026-10-16T20:00:00Z", outcome: "ok", reason: "learning cycle complete",
+                   energy_full_before_uwh: 112700000, energy_full_after_uwh: 94000000 };
+        var d = Logic.diffEvents(before, [pack("BAT0", null, ok)], {});
+        compare(d.events.length, 1);
+        compare(d.events[0].outcome, "ok");
+        compare(Logic.diffEvents(d.seen, [pack("BAT0", null, ok)], {}).events, []);
+
+        var user = { finished_at: "2026-10-17T20:00:00Z", outcome: "aborted", reason: "cancelled by user" };
+        compare(Logic.diffEvents(d.seen, [pack("BAT0", null, user)], {}).events, []);
+
+        var ac = { finished_at: "2026-10-17T21:00:00Z", outcome: "aborted", reason: "AC lost during discharge" };
+        var acd = Logic.diffEvents(d.seen, [pack("BAT0", null, ac)], {});
+        compare(acd.events.length, 1);
+        compare(acd.events[0].reason, "AC lost during discharge");
+    }
+
+    function test_parseSeen() {
+        compare(Logic.parseSeen(""), {});
+        compare(Logic.parseSeen("garbage"), {});
+        compare(Logic.parseSeen("[1]"), {});
+        compare(Logic.parseSeen('{"BAT0":{"override":"","calibration":""}}').BAT0.override, "");
+    }
+
+    function test_notificationFor() {
+        var o = Logic.notificationFor({ kind: "override-ended", pack: "BAT0", target: 100, bandStart: 75, bandStop: 80 });
+        compare(o.title, "Charge override ended");
+        compare(o.text, "BAT0 is back to its 75-80% resting band after charging to 100%.");
+        var ok = Logic.notificationFor({ kind: "calibration-ended", pack: "BAT0", outcome: "ok",
+                                         fullBefore: 112700000, fullAfter: 94000000 });
+        compare(ok.title, "Calibration finished");
+        compare(ok.text, "BAT0 finished its learning cycle. Gauge full 112.7 Wh -> 94.0 Wh.");
+        compare(Logic.notificationFor({ kind: "calibration-ended", pack: "BAT0", outcome: "ok" }).text,
+                "BAT0 finished its learning cycle.");
+        var ac = Logic.notificationFor({ kind: "calibration-ended", pack: "BAT0", outcome: "aborted",
+                                         reason: "AC lost during discharge" });
+        compare(ac.title, "Calibration stopped");
+        compare(ac.text, "BAT0: AC lost during discharge. The pack is back in its resting band.");
+        compare(Logic.notificationFor({ kind: "calibration-ended", pack: "BAT0", outcome: "failed", reason: "" }).title,
+                "Calibration failed");
+    }
 }

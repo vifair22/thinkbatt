@@ -8,8 +8,8 @@ full, rest, force-discharge to a floor at a controlled rate, rest, recharge full
 - so the pack's gauge re-anchors its learned full-charge capacity instead of
 drifting. A control CLI reports status and drives it by hand, and a KDE
 Plasma tray plasmoid replaces Plasma's own battery applet: charge, time
-estimates that know where charging stops, timed charge overrides, and sleep
-blocking.
+estimates that know where charging stops, timed charge overrides, sleep
+blocking, and notifications when an override or a calibration ends.
 
 It is one binary for the whole fleet: it detects at runtime what a given machine
 can do and does only that. A coreboot ThinkPad that exposes `force-discharge`

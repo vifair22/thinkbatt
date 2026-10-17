@@ -11,5 +11,11 @@
     <entry name="command" type="String">
       <default>thinkbatt</default>
     </entry>
+    <!-- What the last status said about each pack's override and last
+         calibration, as JSON, so an end that happened while the plasmoid was
+         not running is still notified. Not shown in the settings. -->
+    <entry name="seen" type="String">
+      <default></default>
+    </entry>
   </group>
 </kcfg>

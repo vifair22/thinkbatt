@@ -358,6 +358,23 @@ None of this goes through thinkbattd: it is per-session, and the daemon is
 system-wide. The daemon's own sleep inhibitor during a calibration (a
 `systemd-inhibit` lock) shows in the list like any other app's.
 
+### Notifications
+
+The plasmoid notifies when:
+
+- a charge override ends (deadline reached, or the pack charged), unless it
+  was ended from the popup's "Back to band"
+- a calibration finishes, with the gauge's full capacity before and after
+- a calibration fails or stops: AC lost part way, a phase timed out, or the
+  daemon shut down. A cancel, and an override displacing the run, are the
+  user's own doing and are not notified.
+
+It keeps a record of what it last saw for each pack (the override and the last
+calibration's finish time) in its configuration, and compares each status
+against it. An end that happened while the plasmoid was not running, with the
+machine suspended or the session logged out, is notified on the first status
+after it is back. A pack seen for the first time is only recorded.
+
 ## Troubleshooting
 
 - **`thinkbatt status` cannot connect** - the daemon is not running, or the

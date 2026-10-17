@@ -7,7 +7,10 @@
 // to reach the control socket (socket_group in thinkbatt.ini).
 //
 // It also takes over the sleep blocking of Plasma's own battery applet, so that
-// one can be hidden: those calls go to powerdevil on the session bus.
+// one can be hidden: those calls go to powerdevil on the session bus. And it
+// notifies when an override or a calibration ends, comparing each status
+// against a record of the last one kept in its configuration, so an end that
+// happened while it was not running is reported when it next sees a status.
 
 pragma ComponentBehavior: Bound
 
@@ -19,6 +22,7 @@ import org.kde.plasma.components as PlasmaComponents3
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.plasma.plasma5support as P5Support
 import org.kde.kirigami as Kirigami
+import org.kde.notification
 import org.kde.plasma.workspace.dbus as DBus
 import "logic.js" as Logic
 
@@ -43,6 +47,11 @@ PlasmoidItem {
     // in flight: switching off before its reply must not leave a block behind.
     property bool inhibitWanted: false
     property bool inhibitPending: false
+
+    // The notification record (Logic.diffEvents), and packs whose override
+    // the user just ended from the popup, which is not news to them.
+    property var seen: Logic.parseSeen(Plasmoid.configuration.seen)
+    property var quietOverride: ({})
 
     readonly property string cli: Plasmoid.configuration.command || "thinkbatt"
     readonly property var primary: packs.length > 0 ? packs[0] : null
@@ -84,11 +93,35 @@ PlasmoidItem {
                     packNames = names;
                 }
                 error = "";
+                noteEvents(next);
             } catch (e) {
                 error = i18n("Unexpected status from thinkbatt: %1", e.message);
             }
         });
         refreshInhibitions();
+    }
+
+    function noteEvents(next) {
+        const d = Logic.diffEvents(seen, next, quietOverride);
+        for (const ev of d.events) {
+            const n = Logic.notificationFor(ev);
+            const obj = notifier.createObject(root, { title: n.title, text: n.text, iconName: n.icon });
+            obj.closed.connect(() => obj.destroy());
+            obj.sendEvent();
+        }
+        const quiet = {};
+        for (const name in quietOverride) {
+            const p = packByName(name);
+            if (p && p.override) {
+                quiet[name] = true;
+            }
+        }
+        quietOverride = quiet;
+        const text = JSON.stringify(d.seen);
+        if (text !== JSON.stringify(seen)) {
+            seen = d.seen;
+            Plasmoid.configuration.seen = text;
+        }
     }
 
     // dbusCall runs a PolicyAgent method and hands its unwrapped reply to
@@ -165,16 +198,37 @@ PlasmoidItem {
     function act(args) {
         actionError = "";
         busy = true;
+        const resetPack = args[0] === "charge" && args[1] === "reset" ? args[3] : "";
+        if (resetPack !== "") {
+            setQuiet(resetPack, true);
+        }
         const started = exec.run(Logic.command(cli, args), (code, out, err) => {
             busy = false;
             if (code !== 0) {
                 actionError = cleanError(code, out, err);
+                // The override is still on, so its real end is news again.
+                if (resetPack !== "") {
+                    setQuiet(resetPack, false);
+                }
             }
             refresh();
         });
         if (!started) {
             busy = false;
+            if (resetPack !== "") {
+                setQuiet(resetPack, false);
+            }
         }
+    }
+
+    function setQuiet(name, on) {
+        const quiet = Object.assign({}, quietOverride);
+        if (on) {
+            quiet[name] = true;
+        } else {
+            delete quiet[name];
+        }
+        quietOverride = quiet;
     }
 
     P5Support.DataSource {
@@ -220,6 +274,15 @@ PlasmoidItem {
         id: listSettle
         interval: 6000
         onTriggered: root.refreshInhibitions()
+    }
+
+    Component {
+        id: notifier
+        Notification {
+            componentName: "plasma_workspace"
+            eventId: "notification"
+            autoDelete: false
+        }
     }
 
     Timer {

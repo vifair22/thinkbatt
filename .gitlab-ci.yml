@@ -37,7 +37,7 @@ variables:
   # alone, which Fedora does not package separately.
   PLASMOID_PACKAGES: >-
     make python3 qt6-qtdeclarative-devel libplasma plasma5support
-    kf6-kirigami kf6-kcmutils plasma-workspace
+    kf6-kirigami kf6-kcmutils kf6-knotifications plasma-workspace
   COVERAGE_MIN: "80"
 
 default:
