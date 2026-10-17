@@ -52,14 +52,22 @@ type PackStatus struct {
 	HasThresholds   bool   `json:"has_thresholds"`
 	// PowerUW is the power into the pack, microwatts: positive while charging,
 	// negative while discharging. VoltageUV is the pack voltage, microvolts.
-	PowerUW             int64              `json:"power_uw"`
-	VoltageUV           int64              `json:"voltage_uv"`
-	EnergyFullUWh       int64              `json:"energy_full_uwh"`
-	EnergyFullDesignUWh int64              `json:"energy_full_design_uwh"`
-	CapsSummary         string             `json:"caps_summary"`
-	CalibrationRunning  bool               `json:"calibration_running"`
-	CalibrationPhase    string             `json:"calibration_phase,omitempty"`
-	LastCalibration     *state.Calibration `json:"last_calibration,omitempty"`
+	PowerUW             int64 `json:"power_uw"`
+	VoltageUV           int64 `json:"voltage_uv"`
+	EnergyFullUWh       int64 `json:"energy_full_uwh"`
+	EnergyFullDesignUWh int64 `json:"energy_full_design_uwh"`
+	// ChargeTarget is the percent at which charging stops on its own (the
+	// band's stop, an override's target, or 100), 0 when nothing is charging
+	// toward a mark (the draining legs of a calibration). TimeToStopS is the
+	// estimated seconds until a charging pack reaches it, TimeToEmptyS until a
+	// discharging pack is empty; each is 0 when there is no estimate.
+	ChargeTarget       int                `json:"charge_target,omitempty"`
+	TimeToStopS        int64              `json:"time_to_stop_s,omitempty"`
+	TimeToEmptyS       int64              `json:"time_to_empty_s,omitempty"`
+	CapsSummary        string             `json:"caps_summary"`
+	CalibrationRunning bool               `json:"calibration_running"`
+	CalibrationPhase   string             `json:"calibration_phase,omitempty"`
+	LastCalibration    *state.Calibration `json:"last_calibration,omitempty"`
 	// Override is the active charge override, if any. While it is set the pack
 	// is held at its target instead of BandStart/BandStop, which stay the
 	// resting band it returns to.

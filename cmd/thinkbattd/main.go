@@ -77,6 +77,10 @@ func runArgs(args []string) error {
 	})
 }
 
+// sampleEvery is how often the daemon samples pack power for the time
+// estimates' moving average: a handful of samples per time constant.
+const sampleEvery = 10 * time.Second
+
 type serveOpts struct {
 	log        *slog.Logger
 	cfgFile    config.File
@@ -131,8 +135,10 @@ func serve(ctx context.Context, o serveOpts) error {
 	srv := control.NewServer(o.sockPath, o.cfgFile.Global.SocketGroup, d, o.log)
 	ticker := time.NewTicker(o.checkEvery)
 	defer ticker.Stop()
+	sampler := time.NewTicker(sampleEvery)
+	defer sampler.Stop()
 
-	if err := d.Serve(ctx, srv, ticker.C, time.Now); err != nil {
+	if err := d.Serve(ctx, srv, ticker.C, sampler.C, time.Now); err != nil {
 		return fmt.Errorf("control server: %w", err)
 	}
 	o.log.Info("shut down")

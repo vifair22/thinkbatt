@@ -111,6 +111,9 @@ func printPack(p control.PackStatus) {
 	fmt.Printf("%s\n", p.Name)
 	fmt.Printf("  charge:      %d%% (%s)\n", p.Capacity, p.Status)
 	fmt.Printf("  power:       %s, %.2f V\n", describePower(p.PowerUW), float64(p.VoltageUV)/1e6)
+	if eta := describeEstimate(p); eta != "" {
+		fmt.Printf("  estimate:    %s\n", eta)
+	}
 	fmt.Printf("  behaviour:   %s\n", p.BehaviourActive)
 	if p.HasThresholds {
 		fmt.Printf("  band:        %d-%d%%\n", p.BandStart, p.BandStop)
@@ -207,6 +210,33 @@ func describePower(uw int64) string {
 		return fmt.Sprintf("%.1f W out", float64(-uw)/1e6)
 	default:
 		return "0.0 W"
+	}
+}
+
+// describeEstimate renders the daemon's time estimate for a pack, or "" when
+// it gave none.
+func describeEstimate(p control.PackStatus) string {
+	switch {
+	case p.TimeToStopS > 0:
+		return fmt.Sprintf("%d%% in %s", p.ChargeTarget, describeDuration(time.Duration(p.TimeToStopS)*time.Second))
+	case p.TimeToEmptyS > 0:
+		return fmt.Sprintf("empty in %s", describeDuration(time.Duration(p.TimeToEmptyS)*time.Second))
+	default:
+		return ""
+	}
+}
+
+// describeDuration renders an estimate to the minute: "2h 05m", "12m", or
+// "under a minute". Finer would claim a precision the estimate does not have.
+func describeDuration(d time.Duration) string {
+	m := int(d.Round(time.Minute) / time.Minute)
+	switch {
+	case m < 1:
+		return "under a minute"
+	case m < 60:
+		return fmt.Sprintf("%dm", m)
+	default:
+		return fmt.Sprintf("%dh %02dm", m/60, m%60)
 	}
 }
 

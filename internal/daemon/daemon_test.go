@@ -342,7 +342,7 @@ func TestServeLoopRunsMaintainAndShutsDown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	errc := make(chan error, 1)
-	go func() { errc <- d.Serve(ctx, fs, nil, clk.Now) }()
+	go func() { errc <- d.Serve(ctx, fs, nil, nil, clk.Now) }()
 
 	// The startup Maintain is due (no prior calibration) and runs one.
 	deadline := time.Now().Add(5 * time.Second)

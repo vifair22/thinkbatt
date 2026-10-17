@@ -209,9 +209,40 @@ function describeLastCalibration(lc) {
     return lc.reason ? s + " (" + lc.reason + ")" : s;
 }
 
+// formatDuration renders an estimate to the minute, the precision it has:
+// "2h 05m", "12m", or "under a minute".
+function formatDuration(seconds) {
+    var m = Math.round(seconds / 60);
+    if (m < 1) {
+        return "under a minute";
+    }
+    if (m < 60) {
+        return m + "m";
+    }
+    return Math.floor(m / 60) + "h " + pad2(m % 60) + "m";
+}
+
+// describeEstimate renders the daemon's time estimate for a pack ("80% in 1h
+// 50m", "3h 10m remaining"), or "" when it gave none. The charge estimate runs
+// to where charging actually stops, the band's stop or an override's target,
+// not to 100%.
+function describeEstimate(pack) {
+    if (pack.time_to_stop_s > 0) {
+        return pack.charge_target + "% in " + formatDuration(pack.time_to_stop_s);
+    }
+    if (pack.time_to_empty_s > 0) {
+        return formatDuration(pack.time_to_empty_s) + " remaining";
+    }
+    return "";
+}
+
 // summary is the one-line tooltip text for a pack.
 function summary(pack, now) {
     var parts = [pack.name + " " + pack.capacity + "%", formatPower(pack.power_uw)];
+    var eta = describeEstimate(pack);
+    if (eta !== "") {
+        parts.push(eta);
+    }
     if (pack.calibration_running) {
         parts.push("calibrating" + (pack.calibration_phase ? ": " + pack.calibration_phase : ""));
     } else if (pack.override) {

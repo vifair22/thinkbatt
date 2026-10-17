@@ -28,7 +28,7 @@ func (h *stubHandler) Status() (control.StatusInfo, error) {
 		CalibrationRunning: true, CalibrationPhase: "discharging",
 		Override:      &state.Override{Target: 100, Until: time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)},
 		EnergyFullUWh: 112_700_000, EnergyFullDesignUWh: 94_000_000,
-		CapsSummary: "band=yes calibrate=yes",
+		CapsSummary: "band=yes calibrate=yes", ChargeTarget: 80, TimeToStopS: 6600,
 		LastCalibration: &state.Calibration{
 			FinishedAt: time.Date(2026, 10, 11, 23, 0, 0, 0, time.UTC),
 			Outcome:    state.OutcomeOK, Reason: "learning cycle complete",
@@ -175,6 +175,23 @@ func TestDescribePower(t *testing.T) {
 	for uw, want := range map[int64]string{6_800_000: "6.8 W in", -12_340_000: "12.3 W out", 0: "0.0 W"} {
 		if got := describePower(uw); got != want {
 			t.Errorf("describePower(%d) = %q, want %q", uw, got, want)
+		}
+	}
+}
+
+func TestDescribeEstimate(t *testing.T) {
+	for _, tc := range []struct {
+		p    control.PackStatus
+		want string
+	}{
+		{control.PackStatus{ChargeTarget: 80, TimeToStopS: 6600}, "80% in 1h 50m"},
+		{control.PackStatus{ChargeTarget: 100, TimeToStopS: 720}, "100% in 12m"},
+		{control.PackStatus{TimeToEmptyS: 11_430}, "empty in 3h 11m"},
+		{control.PackStatus{TimeToEmptyS: 20}, "empty in under a minute"},
+		{control.PackStatus{ChargeTarget: 80}, ""},
+	} {
+		if got := describeEstimate(tc.p); got != tc.want {
+			t.Errorf("describeEstimate(%+v) = %q, want %q", tc.p, got, tc.want)
 		}
 	}
 }

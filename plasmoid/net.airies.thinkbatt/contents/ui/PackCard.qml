@@ -20,6 +20,7 @@ ColumnLayout {
 
     property bool confirmCalibrate: false
     readonly property var band: Logic.effectiveBand(pack)
+    readonly property string eta: Logic.describeEstimate(pack)
     readonly property real health: Logic.healthPercent(pack.energy_full_uwh, pack.energy_full_design_uwh)
 
     spacing: Kirigami.Units.smallSpacing
@@ -65,6 +66,9 @@ ColumnLayout {
 
         PlasmaComponents3.Label { text: i18n("Power"); opacity: 0.7 }
         PlasmaComponents3.Label { text: Logic.formatPower(card.pack.power_uw) }
+
+        PlasmaComponents3.Label { text: i18n("Estimate"); opacity: 0.7; visible: card.eta !== "" }
+        PlasmaComponents3.Label { text: card.eta; visible: card.eta !== "" }
 
         PlasmaComponents3.Label { text: i18n("Voltage"); opacity: 0.7 }
         PlasmaComponents3.Label { text: Logic.formatVoltage(card.pack.voltage_uv) }

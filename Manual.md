@@ -121,6 +121,40 @@ Interactions:
   override still expires on time; an until-full one waits for the pack to come
   back, or for `charge reset`.
 
+## Time estimates
+
+`thinkbatt status` gives each pack a time estimate when it is moving:
+
+```
+  estimate:    80% in 1h 23m      (charging)
+  estimate:    empty in 3h 10m    (on battery)
+```
+
+The charge estimate runs to where charging actually stops, the
+`charge_target` in `status --json`: the band's stop, an override's target, or
+100% for a pack without thresholds and during a calibration's charging legs.
+That is the point of computing it in the daemon. upower, and so Plasma's own
+battery applet, assumes every pack charges to 100%, and with a 75-80 band its
+"time until full" counts toward a charge the pack never reaches. The runtime
+runs to 0%, as Plasma reports it; the session suspends at powerdevil's
+critical level somewhat before that.
+
+Both are linear: the energy left to the mark divided by the power. The power
+is a moving average (a one-minute time constant), sampled every 10 s by the
+daemon itself so the figure does not depend on how often a client asks.
+`power_now` is steady while charging but follows CPU load on battery, and the
+average keeps the runtime from jumping with every status read. It restarts
+when the pack changes direction, so plugging in does not blend the discharge
+rate into the charge estimate; until the next sample a fresh state uses the
+instantaneous power. The status line's watts stay instantaneous.
+
+There is no estimate (the field is omitted from the JSON) when the pack is
+neither charging nor discharging, when the power is under 0.1 W, when the
+result would exceed 48 hours, or during a calibration's discharge legs, whose
+end is the calibration floor rather than empty. The charge estimate slightly
+flatters a target of 100%, since the charger tapers over the last few percent;
+at a band stop of 80 the taper has not begun.
+
 ## Multiple batteries
 
 thinkbatt manages every system battery the machine presents, not just the
@@ -266,7 +300,8 @@ The popup shows, per pack:
 
 - charge, status, and a bar with the band the pack is held at drawn over it
   (green for the resting band, the attention colour for an override)
-- power in or out of the pack and its voltage
+- power in or out of the pack, the time estimate (see Time estimates), and its
+  voltage
 - health: the learned full-charge capacity against design
 - the band, and the resting band behind an override
 - calibration: the running phase, or the last run
@@ -311,3 +346,7 @@ net.airies.thinkbatt` runs it in a window.
 - **Plasmoid shows "Cannot reach thinkbattd"** - the same as the CLI failing:
   check the daemon is running and that the user is in `socket_group`. An error
   mentioning `--json` means the installed CLI predates 0.3.0.
+- **No estimate, or no power reading, after an upgrade** - the package does
+  not restart the daemon. `systemctl restart thinkbattd` (after
+  `systemctl daemon-reload` if the unit changed); `thinkbatt status` from the
+  new CLI against the old daemon simply lacks the new fields.

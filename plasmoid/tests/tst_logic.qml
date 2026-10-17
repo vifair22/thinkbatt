@@ -168,4 +168,16 @@ TestCase {
         var bare = { name: "BAT0", capacity: 57, power_uw: 0, has_thresholds: false };
         compare(Logic.summary(bare, now), "BAT0 57%, 0.0 W");
     }
+    function test_estimates() {
+        compare(Logic.formatDuration(20), "under a minute");
+        compare(Logic.formatDuration(720), "12m");
+        compare(Logic.formatDuration(6600), "1h 50m");
+        compare(Logic.formatDuration(3600 * 3 + 300), "3h 05m");
+        compare(Logic.describeEstimate({ charge_target: 80, time_to_stop_s: 6600 }), "80% in 1h 50m");
+        compare(Logic.describeEstimate({ time_to_empty_s: 11400 }), "3h 10m remaining");
+        compare(Logic.describeEstimate({ charge_target: 80 }), "");
+        compare(Logic.summary({ name: "BAT0", capacity: 45, power_uw: 11200000, has_thresholds: true,
+                                band_start: 75, band_stop: 80, charge_target: 80, time_to_stop_s: 6600 }, new Date()),
+                "BAT0 45%, 11.2 W in, 80% in 1h 50m, band 75-80%");
+    }
 }

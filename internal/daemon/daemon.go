@@ -51,6 +51,7 @@ type managed struct {
 	bat     battery.Battery
 	profile caps.Profile
 	cfg     config.Config
+	power   powerAverage // smoothed power for the time estimates, fed by Sample
 }
 
 // Options configures a Daemon.
@@ -251,6 +252,34 @@ func (d *Daemon) expireOverrides(now time.Time) {
 	d.mu.Unlock()
 	if ended {
 		d.persist()
+	}
+}
+
+// Sample feeds each pack's current power into its moving average, which the
+// time estimates in Status divide by. It runs on its own short ticker rather
+// than the maintenance tick: an average needs samples every few seconds, and
+// the maintenance pass is minutes apart and does sysfs writes.
+func (d *Daemon) Sample(now time.Time) {
+	d.mu.Lock()
+	packs := make([]*managed, 0, len(d.packs))
+	for _, m := range d.packs {
+		packs = append(packs, m)
+	}
+	d.mu.Unlock()
+
+	for _, m := range packs {
+		r, err := m.bat.Read()
+		if err != nil {
+			// Status reports the failure; a missed sample only ages the average.
+			continue
+		}
+		d.mu.Lock()
+		// A pack removed and rediscovered while unlocked is a new managed with
+		// its own average; this sample belongs to the old one and is dropped.
+		if d.packs[m.name] == m {
+			m.power.add(r, now)
+		}
+		d.mu.Unlock()
 	}
 }
 
@@ -634,8 +663,14 @@ func (d *Daemon) Status() (control.StatusInfo, error) {
 	d.mu.Lock()
 	names := d.sortedNamesLocked()
 	packs := make([]*managed, 0, len(names))
+	stops := make([]int, 0, len(names))
+	averages := make([]powerAverage, 0, len(names))
 	for _, n := range names {
-		packs = append(packs, d.packs[n])
+		m := d.packs[n]
+		packs = append(packs, m)
+		_, stop := d.bandForLocked(m)
+		stops = append(stops, stop)
+		averages = append(averages, m.power)
 	}
 	running := d.running
 	runningPack := d.runningPack
@@ -647,11 +682,18 @@ func (d *Daemon) Status() (control.StatusInfo, error) {
 	d.mu.Unlock()
 
 	info := control.StatusInfo{}
-	for _, m := range packs {
+	for i, m := range packs {
 		r, err := m.bat.Read()
 		if err != nil {
 			return control.StatusInfo{}, fmt.Errorf("battery %s read: %w", m.name, err)
 		}
+		calibrating := running && runningPack == m.name
+		packPhase := ""
+		if calibrating {
+			packPhase = phase
+		}
+		target := chargeTarget(m.profile.HasThresholds, stops[i], calibrating, packPhase)
+		est := estimate(r, averages[i].powerFor(r), target, calibrating)
 		beh, err := m.bat.Behaviour()
 		if err != nil {
 			return control.StatusInfo{}, fmt.Errorf("battery %s behaviour: %w", m.name, err)
@@ -669,13 +711,14 @@ func (d *Daemon) Status() (control.StatusInfo, error) {
 			EnergyFullUWh:       r.EnergyFullUWh,
 			EnergyFullDesignUWh: r.EnergyFullDesignUWh,
 			CapsSummary:         m.profile.Summary(),
-			CalibrationRunning:  running && runningPack == m.name,
+			ChargeTarget:        target,
+			TimeToStopS:         int64(est.toStop / time.Second),
+			TimeToEmptyS:        int64(est.toEmpty / time.Second),
+			CalibrationRunning:  calibrating,
+			CalibrationPhase:    packPhase,
 			LastCalibration:     snap.Last(m.name),
 			Override:            snap.Override(m.name),
 		})
-		if running && runningPack == m.name {
-			info.Packs[len(info.Packs)-1].CalibrationPhase = phase
-		}
 	}
 	return info, nil
 }
@@ -697,13 +740,15 @@ type Server interface {
 
 // Serve runs the daemon's main loop: it starts the control server, runs a
 // maintenance pass at startup and on every tick, and shuts down cleanly when
-// ctx is cancelled or the server stops. ticks is the maintenance heartbeat (a
-// time.Ticker channel in production); now supplies the current time.
-func (d *Daemon) Serve(ctx context.Context, srv Server, ticks <-chan time.Time, now func() time.Time) error {
+// ctx is cancelled or the server stops. ticks is the maintenance heartbeat and
+// samples the power-sampling one (time.Ticker channels in production; a nil
+// channel never fires); now supplies the current time.
+func (d *Daemon) Serve(ctx context.Context, srv Server, ticks, samples <-chan time.Time, now func() time.Time) error {
 	srvErr := make(chan error, 1)
 	go func() { srvErr <- srv.Serve() }()
 
 	d.Maintain(now())
+	d.Sample(now())
 	for {
 		select {
 		case <-ctx.Done():
@@ -715,6 +760,8 @@ func (d *Daemon) Serve(ctx context.Context, srv Server, ticks <-chan time.Time, 
 			return err
 		case <-ticks:
 			d.Maintain(now())
+		case <-samples:
+			d.Sample(now())
 		}
 	}
 }
