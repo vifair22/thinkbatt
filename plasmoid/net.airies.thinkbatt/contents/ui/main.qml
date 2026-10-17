@@ -338,7 +338,7 @@ PlasmoidItem {
         Layout.preferredWidth: Kirigami.Units.gridUnit * 22
         Layout.minimumHeight: Kirigami.Units.gridUnit * 12
         Layout.preferredHeight: Math.min(Kirigami.Units.gridUnit * 36,
-                                         body.implicitHeight + header.implicitHeight + Kirigami.Units.gridUnit * 2)
+                                         scroll.contentHeight + header.implicitHeight)
 
         header: PlasmaExtras.PlasmoidHeading {
             RowLayout {
@@ -367,19 +367,23 @@ PlasmoidItem {
             id: scroll
             anchors.fill: parent
             contentWidth: availableWidth
+            contentHeight: body.implicitHeight + 2 * Kirigami.Units.largeSpacing
             PlasmaComponents3.ScrollBar.horizontal.policy: PlasmaComponents3.ScrollBar.AlwaysOff
 
             ColumnLayout {
                 id: body
                 // Explicit margins: plasmawindowed gives none, and the tray
-                // popup's own are thin against the scrollbar. The width is
-                // taken from the view with a fixed gutter for the vertical
-                // scrollbar, not from the width left once it shows: wrapped
-                // text reflows with the width, which changes the height,
-                // which toggles the scrollbar, a binding loop.
-                x: Kirigami.Units.largeSpacing
-                width: scroll.width - 2 * Kirigami.Units.largeSpacing - Kirigami.Units.gridUnit
-                spacing: Kirigami.Units.largeSpacing
+                // popup's own are thin against the scrollbar. They are even,
+                // a grid unit each side, wide enough that the vertical
+                // scrollbar sits inside the right one when it shows. The
+                // width is taken from the view, not from the width left once
+                // the scrollbar shows: wrapped text reflows with the width,
+                // which changes the height, which toggles the scrollbar, a
+                // binding loop.
+                x: Kirigami.Units.gridUnit
+                y: Kirigami.Units.largeSpacing
+                width: scroll.width - 2 * Kirigami.Units.gridUnit
+                spacing: Kirigami.Units.gridUnit
 
                 Kirigami.InlineMessage {
                     Layout.fillWidth: true
@@ -395,20 +399,6 @@ PlasmoidItem {
                     text: root.actionError
                     showCloseButton: true
                     onVisibleChanged: if (!visible) root.actionError = ""
-                }
-
-                InhibitControls {
-                    Layout.fillWidth: true
-                    inhibitions: root.inhibitions
-                    blocking: root.blocking
-                    available: powerdevil.registered
-                    busy: root.inhibitPending
-                    onBlockingRequested: (on) => root.setBlocking(on)
-                    onAllowRequested: (who, why, allowed) => root.setAllowed(who, why, allowed)
-                }
-
-                Kirigami.Separator {
-                    Layout.fillWidth: true
                 }
 
                 PlasmaExtras.PlaceholderMessage {
@@ -428,6 +418,18 @@ PlasmoidItem {
                         busy: root.busy
                         onAction: (args) => root.act(args)
                     }
+                }
+
+                // Machine-wide rather than per pack, so after the packs, as
+                // in Plasma's own applet.
+                InhibitControls {
+                    Layout.fillWidth: true
+                    inhibitions: root.inhibitions
+                    blocking: root.blocking
+                    available: powerdevil.registered
+                    busy: root.inhibitPending
+                    onBlockingRequested: (on) => root.setBlocking(on)
+                    onAllowRequested: (who, why, allowed) => root.setAllowed(who, why, allowed)
                 }
             }
         }

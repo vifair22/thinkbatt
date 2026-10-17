@@ -27,10 +27,14 @@ ColumnLayout {
 
     spacing: Kirigami.Units.smallSpacing
 
+    Kirigami.Heading {
+        level: 4
+        text: i18n("Sleep and screen locking")
+    }
+
     PlasmaComponents3.Switch {
-        id: blockSwitch
         Layout.fillWidth: true
-        text: i18n("Block sleep and screen locking")
+        text: i18n("Block manually")
         checked: inh.blocking
         enabled: inh.available && !inh.busy
         onToggled: {
@@ -49,26 +53,45 @@ ColumnLayout {
         text: i18n("Power management is not running, so sleep cannot be blocked from here.")
     }
 
+    // Each app's request: its name, then what it holds off and why, with the
+    // button to overrule it.
     Repeater {
         model: inh.others
         delegate: RowLayout {
             id: row
             required property var modelData
             Layout.fillWidth: true
+            Layout.topMargin: Kirigami.Units.smallSpacing
+            spacing: Kirigami.Units.largeSpacing
+
             Kirigami.Icon {
+                Layout.alignment: Qt.AlignTop
                 source: row.modelData.allowed ? "system-suspend-inhibited" : "system-suspend-uninhibited"
-                implicitWidth: Kirigami.Units.iconSizes.small
-                implicitHeight: Kirigami.Units.iconSizes.small
+                implicitWidth: Kirigami.Units.iconSizes.smallMedium
+                implicitHeight: Kirigami.Units.iconSizes.smallMedium
             }
-            PlasmaComponents3.Label {
+            ColumnLayout {
                 Layout.fillWidth: true
-                wrapMode: Text.Wrap
-                opacity: row.modelData.allowed ? 1 : 0.6
-                text: row.modelData.allowed
-                    ? i18n("%1 is blocking %2: %3", row.modelData.who, Logic.describeBlocked(row.modelData.what), row.modelData.why)
-                    : i18n("%1 wanted to block %2 (not allowed): %3", row.modelData.who, Logic.describeBlocked(row.modelData.what), row.modelData.why)
+                spacing: 0
+                PlasmaComponents3.Label {
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                    font.weight: Font.DemiBold
+                    opacity: row.modelData.allowed ? 1 : 0.6
+                    text: row.modelData.who
+                }
+                PlasmaComponents3.Label {
+                    Layout.fillWidth: true
+                    wrapMode: Text.Wrap
+                    font: Kirigami.Theme.smallFont
+                    opacity: 0.7
+                    text: row.modelData.allowed
+                        ? i18n("Blocking %1: %2", Logic.describeBlocked(row.modelData.what), row.modelData.why)
+                        : i18n("Not allowed to block %1: %2", Logic.describeBlocked(row.modelData.what), row.modelData.why)
+                }
             }
-            PlasmaComponents3.ToolButton {
+            PlasmaComponents3.Button {
+                Layout.alignment: Qt.AlignVCenter
                 text: row.modelData.allowed ? i18n("Block") : i18n("Allow")
                 enabled: !inh.busy
                 onClicked: inh.allowRequested(row.modelData.who, row.modelData.why, !row.modelData.allowed)

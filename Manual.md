@@ -305,7 +305,7 @@ a running calibration, a warning when the daemon cannot be reached; or, with
 none of those, the sleep-inhibited mark while sleep is blocked from the popup.
 The tooltip has a line per pack, and says when sleep is blocked.
 
-The popup has the sleep blocking at the top, then per pack:
+The popup shows, per pack:
 
 - charge, status, and a bar with the band the pack is held at drawn over it
   (green for the resting band, the attention colour for an override)
@@ -317,8 +317,11 @@ The popup has the sleep blocking at the top, then per pack:
 - the charge-override form: a target (50% to full) and how it ends, which is
   until full, at a time (its next occurrence), or at a date and time picked from
   a calendar; or, with one active, what it is and a "Back to band" button
-- "Calibrate now...", which asks for confirmation first, and "Cancel
-  calibration" while one runs
+- a menu (the pack's overflow button) with "Calibrate now...", which asks for
+  confirmation first, and "Cancel calibration"; while a run is going a Cancel
+  button also sits under the readings
+
+and, after the packs, the sleep blocking (see Sleep blocking below).
 
 It does not speak the control protocol itself. It runs the `thinkbatt` CLI
 (`status --json` every 3 s while open, every 30 s while closed, and the same
