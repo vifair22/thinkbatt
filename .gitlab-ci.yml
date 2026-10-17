@@ -33,9 +33,11 @@ variables:
   PLASMOID_IMAGE: fedora:42
   # What the plasmoid jobs install: the Qt tools, and every QML module the
   # plasmoid imports, so qmllint resolves each import rather than skipping it.
+  # plasma-workspace is there for its org.kde.plasma.workspace.dbus module
+  # alone, which Fedora does not package separately.
   PLASMOID_PACKAGES: >-
     make python3 qt6-qtdeclarative-devel libplasma plasma5support
-    kf6-kirigami kf6-kcmutils
+    kf6-kirigami kf6-kcmutils plasma-workspace
   COVERAGE_MIN: "80"
 
 default:

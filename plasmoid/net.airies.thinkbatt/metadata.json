@@ -8,7 +8,8 @@
             }
         ],
         "Category": "System Information",
-        "Description": "Battery charge band, timed charge overrides and fuel-gauge calibration, from thinkbattd",
+        "Description": "Battery charge band, timed charge overrides, fuel-gauge calibration and sleep blocking, from thinkbattd",
+        "EnabledByDefault": true,
         "Icon": "battery-good",
         "Id": "net.airies.thinkbatt",
         "License": "GPL-3.0-or-later",

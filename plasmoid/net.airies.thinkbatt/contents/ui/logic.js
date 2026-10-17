@@ -252,3 +252,101 @@ function summary(pack, now) {
     }
     return parts.join(", ");
 }
+
+// Sleep and screen-lock blocking goes through powerdevil's PolicyAgent on the
+// session bus, the interface Plasma's own battery applet uses. An inhibition is
+// tied to the D-Bus connection that asked for it, which here is plasmashell's,
+// so it lasts exactly as long as the plasmoid does.
+var POLICY_SERVICE = "org.kde.Solid.PowerManagement";
+var POLICY_PATH = "/org/kde/Solid/PowerManagement/PolicyAgent";
+var POLICY_IFACE = "org.kde.Solid.PowerManagement.PolicyAgent";
+// PolicyAgent's RequiredPolicy bits: InterruptSession (1, sleep) and
+// ChangeScreenSettings (4, dimming and locking). Plasma's manual block asks for
+// the same pair.
+var INHIBIT_TYPES = 5;
+// Who and why the plasmoid's own inhibition is filed under. Other inhibitors
+// see these in their own lists, and the plasmoid uses them to tell its own
+// entry apart from everyone else's.
+var INHIBIT_APP = "thinkbatt";
+var INHIBIT_REASON = "Blocked from the thinkbatt tray";
+
+// unwrap takes the plain value out of the {value: x} wrappers the Plasma D-Bus
+// QML module puts around each field of a decoded struct.
+function unwrap(v) {
+    return v !== null && typeof v === "object" && !isList(v) && "value" in v ? v.value : v;
+}
+
+// isList accepts a JS array and the sequence objects the D-Bus module returns
+// for D-Bus arrays and structs, which index and have a length but fail
+// Array.isArray.
+function isList(v) {
+    return v !== null && typeof v === "object" && typeof v.length === "number";
+}
+
+function toList(v) {
+    return isList(v) ? Array.prototype.slice.call(v) : null;
+}
+
+// parseInhibitions decodes PolicyAgent's RequestedInhibitions, an a(ssssu) of
+// (what, who, why, mode, flags). Requested lists every inhibition including
+// the ones the user has blocked; flags is 3 for one in force and 0 for a
+// blocked one, so any set bit counts as allowed. Requests that share who and
+// why (one app asking for sleep and idle separately) are merged, since
+// SetInhibitionAllowed blocks or allows them together.
+function parseInhibitions(value) {
+    var list = toList(unwrap(value));
+    if (!list) {
+        return [];
+    }
+    var byKey = {};
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+        var f = toList(unwrap(list[i]));
+        if (!f || f.length < 5) {
+            continue;
+        }
+        var what = String(unwrap(f[0]));
+        var who = String(unwrap(f[1]));
+        var why = String(unwrap(f[2]));
+        var allowed = Number(unwrap(f[4])) !== 0;
+        var key = who + "\n" + why;
+        var e = byKey[key];
+        if (!e) {
+            e = { who: who, why: why, what: [], allowed: allowed, own: who === INHIBIT_APP && why === INHIBIT_REASON };
+            byKey[key] = e;
+            out.push(e);
+        }
+        e.allowed = e.allowed && allowed;
+        var parts = what.split(":");
+        for (var j = 0; j < parts.length; j++) {
+            if (parts[j] !== "" && e.what.indexOf(parts[j]) < 0) {
+                e.what.push(parts[j]);
+            }
+        }
+    }
+    return out;
+}
+
+var WHAT_NAMES = { sleep: "sleep", idle: "screen locking", "handle-lid-switch": "lid close", shutdown: "shutdown" };
+
+// describeBlocked names what an inhibition holds off: "sleep and screen
+// locking", from logind-style what tokens.
+function describeBlocked(what) {
+    var names = [];
+    for (var i = 0; i < what.length; i++) {
+        var n = WHAT_NAMES[what[i]] || what[i];
+        if (names.indexOf(n) < 0) {
+            names.push(n);
+        }
+    }
+    if (names.length <= 1) {
+        return names.join("");
+    }
+    return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+}
+
+// policyCall builds the message for a PolicyAgent method; args must already be
+// wrapped in the D-Bus module's typed values.
+function policyCall(member, args, signature) {
+    return { service: POLICY_SERVICE, path: POLICY_PATH, iface: POLICY_IFACE, member: member, arguments: args, signature: signature };
+}

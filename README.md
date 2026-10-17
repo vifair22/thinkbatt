@@ -6,7 +6,10 @@ It owns the resting charge band (so the pack spends its life in a narrow,
 low-wear window), and runs a periodic fuel-gauge **learning cycle** - charge
 full, rest, force-discharge to a floor at a controlled rate, rest, recharge full
 - so the pack's gauge re-anchors its learned full-charge capacity instead of
-drifting. A control CLI reports status and drives it by hand.
+drifting. A control CLI reports status and drives it by hand, and a KDE
+Plasma tray plasmoid replaces Plasma's own battery applet: charge, time
+estimates that know where charging stops, timed charge overrides, and sleep
+blocking.
 
 It is one binary for the whole fleet: it detects at runtime what a given machine
 can do and does only that. A coreboot ThinkPad that exposes `force-discharge`
@@ -82,9 +85,9 @@ The tray plasmoid, system-wide:
 sudo make install-plasmoid PREFIX=/usr     # into /usr/share/plasma/plasmoids
 ```
 
-Then enable it under System Tray Settings -> Entries -> thinkbatt. It runs the
-`thinkbatt` CLI as the logged-in user, so set `socket_group` in
-`thinkbatt.ini` to a group that user is in.
+It shows in the tray by default (System Tray Settings -> Entries -> thinkbatt
+otherwise). It runs the `thinkbatt` CLI as the logged-in user, so set
+`socket_group` in `thinkbatt.ini` to a group that user is in.
 
 On a machine where thinkbatt owns the band, remove any older charge-threshold
 udev rule (e.g. the thinkpad-t430 `80-t430-battery.rules`) so the two do not

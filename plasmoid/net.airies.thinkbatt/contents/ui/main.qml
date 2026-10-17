@@ -5,6 +5,9 @@
 // closed) through Plasma's executable engine and runs the same CLI for every
 // action, so it needs nothing the command line does not: the user must be able
 // to reach the control socket (socket_group in thinkbatt.ini).
+//
+// It also takes over the sleep blocking of Plasma's own battery applet, so that
+// one can be hidden: those calls go to powerdevil on the session bus.
 
 pragma ComponentBehavior: Bound
 
@@ -16,6 +19,7 @@ import org.kde.plasma.components as PlasmaComponents3
 import org.kde.plasma.extras as PlasmaExtras
 import org.kde.plasma.plasma5support as P5Support
 import org.kde.kirigami as Kirigami
+import org.kde.plasma.workspace.dbus as DBus
 import "logic.js" as Logic
 
 PlasmoidItem {
@@ -30,6 +34,16 @@ PlasmoidItem {
     property bool busy: false
     property date now: new Date()
 
+    // Sleep blocking. The cookie is the plasmoid's own inhibition; it lives on
+    // plasmashell's D-Bus connection, so it and this property end together.
+    property var inhibitions: []
+    property var inhibitCookie: null
+    readonly property bool blocking: inhibitCookie !== null
+    // What the switch last asked for, and whether an AddInhibition is still
+    // in flight: switching off before its reply must not leave a block behind.
+    property bool inhibitWanted: false
+    property bool inhibitPending: false
+
     readonly property string cli: Plasmoid.configuration.command || "thinkbatt"
     readonly property var primary: packs.length > 0 ? packs[0] : null
     readonly property bool anyOverride: packs.some((p) => !!p.override)
@@ -38,7 +52,8 @@ PlasmoidItem {
     Plasmoid.icon: primary ? Logic.iconName(primary.capacity, Logic.isCharging(primary)) : "battery-missing"
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     toolTipMainText: i18n("thinkbatt")
-    toolTipSubText: error !== "" ? error : packs.map((p) => Logic.summary(p, now)).join("\n")
+    toolTipSubText: (error !== "" ? error : packs.map((p) => Logic.summary(p, now)).join("\n"))
+        + (blocking ? "\n" + i18n("Sleep and screen locking blocked") : "")
 
     function packByName(name) {
         for (let i = 0; i < packs.length; i++) {
@@ -73,6 +88,78 @@ PlasmoidItem {
                 error = i18n("Unexpected status from thinkbatt: %1", e.message);
             }
         });
+        refreshInhibitions();
+    }
+
+    // dbusCall runs a PolicyAgent method and hands its unwrapped reply to
+    // onReply. A failure lands in the popup's action error, not silently, and
+    // then onError runs, if given.
+    function dbusCall(member, args, signature, onReply, onError) {
+        const reply = DBus.SessionBus.asyncCall(Logic.policyCall(member, args, signature));
+        reply.finished.connect(() => {
+            if (reply.isError) {
+                actionError = i18n("Power management: %1", reply.error.message());
+                if (onError) {
+                    onError();
+                }
+            } else if (onReply) {
+                onReply(Logic.unwrap(reply.value));
+            }
+        });
+    }
+
+    function refreshInhibitions() {
+        if (!powerdevil.registered) {
+            inhibitions = [];
+            return;
+        }
+        const reply = DBus.SessionBus.asyncCall({
+            service: Logic.POLICY_SERVICE,
+            path: Logic.POLICY_PATH,
+            iface: "org.freedesktop.DBus.Properties",
+            member: "Get",
+            arguments: [new DBus.string(Logic.POLICY_IFACE), new DBus.string("RequestedInhibitions")],
+            signature: "(ss)",
+        });
+        reply.finished.connect(() => {
+            if (!reply.isError) {
+                inhibitions = Logic.parseInhibitions(reply.value);
+            }
+        });
+    }
+
+    function setBlocking(on) {
+        actionError = "";
+        inhibitWanted = on;
+        if (on && inhibitCookie === null && !inhibitPending) {
+            inhibitPending = true;
+            dbusCall("AddInhibition", [new DBus.uint32(Logic.INHIBIT_TYPES), new DBus.string(Logic.INHIBIT_APP),
+                                       new DBus.string(Logic.INHIBIT_REASON)], "(uss)",
+                     (cookie) => {
+                         inhibitPending = false;
+                         if (inhibitWanted) {
+                             inhibitCookie = cookie;
+                         } else {
+                             release(cookie);
+                         }
+                     },
+                     () => { inhibitPending = false; });
+        } else if (!on && inhibitCookie !== null) {
+            const cookie = inhibitCookie;
+            inhibitCookie = null;
+            release(cookie);
+        }
+        listSettle.restart();
+    }
+
+    function release(cookie) {
+        dbusCall("ReleaseInhibition", [new DBus.uint32(cookie)], "(u)", null);
+    }
+
+    function setAllowed(who, why, allowed) {
+        actionError = "";
+        dbusCall("SetInhibitionAllowed", [new DBus.string(who), new DBus.string(why), new DBus.bool(allowed)], "(ssb)",
+                 () => refreshInhibitions());
     }
 
     function act(args) {
@@ -119,6 +206,22 @@ PlasmoidItem {
         }
     }
 
+    DBus.DBusServiceWatcher {
+        id: powerdevil
+        busType: DBus.BusType.Session
+        watchedService: Logic.POLICY_SERVICE
+        onRegisteredChanged: root.refreshInhibitions()
+    }
+
+    // powerdevil lists a new inhibition only after holding it for a few
+    // seconds (it ignores ones that come and go), so the list is read again
+    // once that has passed rather than straight after a change.
+    Timer {
+        id: listSettle
+        interval: 6000
+        onTriggered: root.refreshInhibitions()
+    }
+
     Timer {
         interval: root.expanded ? 3000 : 30000
         running: true
@@ -151,11 +254,12 @@ PlasmoidItem {
 
         // A badge says the pack is not just sitting in its band: an override
         // is holding it higher, a calibration is cycling it, or the daemon
-        // cannot be reached.
+        // cannot be reached; or that sleep is blocked from the popup.
         Kirigami.Icon {
             readonly property string badge: root.error !== "" ? "dialog-warning"
                 : root.anyCalibrating ? "view-refresh"
                 : root.anyOverride ? "go-up"
+                : root.blocking ? "system-suspend-inhibited"
                 : ""
             visible: badge !== ""
             source: badge
@@ -228,6 +332,20 @@ PlasmoidItem {
                     text: root.actionError
                     showCloseButton: true
                     onVisibleChanged: if (!visible) root.actionError = ""
+                }
+
+                InhibitControls {
+                    Layout.fillWidth: true
+                    inhibitions: root.inhibitions
+                    blocking: root.blocking
+                    available: powerdevil.registered
+                    busy: root.inhibitPending
+                    onBlockingRequested: (on) => root.setBlocking(on)
+                    onAllowRequested: (who, why, allowed) => root.setAllowed(who, why, allowed)
+                }
+
+                Kirigami.Separator {
+                    Layout.fillWidth: true
                 }
 
                 PlasmaExtras.PlaceholderMessage {

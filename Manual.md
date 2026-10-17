@@ -290,13 +290,22 @@ confirm the pack returns to the band at the end. Confirm `thinkbatt cancel` and
 
 ## Plasma tray plasmoid
 
-`net.airies.thinkbatt` is a KDE Plasma 6 system-tray entry. Its icon follows
-the first pack's charge, with a badge when a pack is not simply resting in its
-band: an arrow for a charge override, a refresh mark for a running
-calibration, a warning when the daemon cannot be reached. The tooltip has a
-line per pack.
+`net.airies.thinkbatt` is a KDE Plasma 6 system-tray entry, meant to replace
+Plasma's own battery applet on a machine thinkbatt manages: it shows the same
+charge and time estimates (to where charging really stops) and has the same
+sleep blocking. It is enabled in the tray by default; hide the stock one by
+setting "Power and Battery" (`org.kde.plasma.battery`) to Disabled under
+System Tray Settings -> Entries. Brightness is its own entry and is not
+affected. Power profiles are not carried over; they stay in System Settings ->
+Power Management.
 
-The popup shows, per pack:
+Its icon follows the first pack's charge, with a badge when a pack is not
+simply resting in its band: an arrow for a charge override, a refresh mark for
+a running calibration, a warning when the daemon cannot be reached; or, with
+none of those, the sleep-inhibited mark while sleep is blocked from the popup.
+The tooltip has a line per pack, and says when sleep is blocked.
+
+The popup has the sleep blocking at the top, then per pack:
 
 - charge, status, and a bar with the band the pack is held at drawn over it
   (green for the resting band, the attention colour for an override)
@@ -328,6 +337,27 @@ env THINKBATT_SOCKET=/run/thinkbattd-test/control.sock ~/git/home/thinkbatt/buil
 For a quick look without adding it to the panel, `plasmawindowed
 net.airies.thinkbatt` runs it in a window.
 
+### Sleep blocking
+
+"Block sleep and screen locking" holds off suspend, screen dimming and locking
+until it is switched off, the same manual block Plasma's battery applet has. It
+is a powerdevil inhibition (PolicyAgent `AddInhibition`, InterruptSession and
+ChangeScreenSettings), filed as `thinkbatt` with the reason "Blocked from the
+thinkbatt tray". It lives on plasmashell's D-Bus connection, so it ends when
+the session does, or when plasmashell restarts; the switch starts off again
+with it.
+
+Below the switch is every other inhibition powerdevil knows about: which app,
+what it holds off, and its stated reason. Each has a Block button that tells
+powerdevil to ignore that request (`SetInhibitionAllowed`), so a stuck video
+player or a forgotten download cannot keep the machine awake, and Allow to
+undo it. powerdevil only lists an inhibition a few seconds after it is taken,
+so a new one can take a moment to appear.
+
+None of this goes through thinkbattd: it is per-session, and the daemon is
+system-wide. The daemon's own sleep inhibitor during a calibration (a
+`systemd-inhibit` lock) shows in the list like any other app's.
+
 ## Troubleshooting
 
 - **`thinkbatt status` cannot connect** - the daemon is not running, or the
@@ -350,3 +380,6 @@ net.airies.thinkbatt` runs it in a window.
   not restart the daemon. `systemctl restart thinkbattd` (after
   `systemctl daemon-reload` if the unit changed); `thinkbatt status` from the
   new CLI against the old daemon simply lacks the new fields.
+- **"Block sleep and screen locking" is disabled** - powerdevil is not running
+  in the session (the popup says so). Plasma starts it; outside Plasma there is
+  nothing for it to talk to.

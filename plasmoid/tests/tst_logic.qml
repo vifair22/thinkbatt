@@ -180,4 +180,51 @@ TestCase {
                                 band_start: 75, band_stop: 80, charge_target: 80, time_to_stop_s: 6600 }, new Date()),
                 "BAT0 45%, 11.2 W in, 80% in 1h 50m, band 75-80%");
     }
+
+    // The shape the Plasma D-Bus module hands back for a(ssssu): each field
+    // wrapped in {value}.
+    function wrapped(rows) {
+        return rows.map((r) => r.map((v) => ({ value: v })));
+    }
+
+    function test_parseInhibitions() {
+        var got = Logic.parseInhibitions(wrapped([
+            ["sleep", "Running Script", "sleep", "block", 3],
+            ["idle", "Running Script", "sleep", "block", 3],
+            ["sleep:idle", "probe", "probe why", "block", 0],
+            ["sleep:idle", Logic.INHIBIT_APP, Logic.INHIBIT_REASON, "block", 3],
+            ["short"],
+        ]));
+        compare(got.length, 3);
+        compare(got[0].who, "Running Script");
+        compare(got[0].what, ["sleep", "idle"]);
+        verify(got[0].allowed);
+        verify(!got[0].own);
+        verify(!got[1].allowed, "flags 0 is a blocked request");
+        verify(got[2].own);
+        // The module's sequences index and have a length but are not arrays.
+        var row = { length: 5, 0: { value: "sleep" }, 1: { value: "seq" }, 2: { value: "why" }, 3: { value: "block" }, 4: { value: 3 } };
+        var seq = Logic.parseInhibitions({ length: 1, 0: row });
+        compare(seq.length, 1);
+        compare(seq[0].who, "seq");
+        compare(Logic.parseInhibitions({ value: [] }), []);
+        compare(Logic.parseInhibitions(undefined), []);
+        compare(Logic.unwrap({ value: 22 }), 22);
+        compare(Logic.unwrap(22), 22);
+    }
+
+    function test_describeBlocked() {
+        compare(Logic.describeBlocked(["sleep", "idle"]), "sleep and screen locking");
+        compare(Logic.describeBlocked(["sleep"]), "sleep");
+        compare(Logic.describeBlocked(["sleep", "idle", "handle-lid-switch"]), "sleep, screen locking and lid close");
+        compare(Logic.describeBlocked(["sleep", "sleep"]), "sleep");
+        compare(Logic.describeBlocked(["weird"]), "weird");
+    }
+
+    function test_policyCall() {
+        var m = Logic.policyCall("ReleaseInhibition", [7], "(u)");
+        compare(m.service, "org.kde.Solid.PowerManagement");
+        compare(m.member, "ReleaseInhibition");
+        compare(m.signature, "(u)");
+    }
 }
