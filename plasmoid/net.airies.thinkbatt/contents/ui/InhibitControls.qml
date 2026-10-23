@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Sleep and screen-lock blocking, the part of Plasma's battery applet that
-// thinkbatt replaces: a switch for a manual block of its own, and every other
-// app's inhibition with a toggle to block or allow it. The D-Bus calls are
-// main.qml's; this only shows the state and emits what the user asked for.
+// thinkbatt replaces: switches for the plasmoid's own blocks (sleep and screen
+// locking, or sleep alone), and every other app's inhibition with a toggle to
+// block or allow it. The D-Bus calls are main.qml's; this only shows the state
+// and emits what the user asked for.
 
 pragma ComponentBehavior: Bound
 
@@ -17,10 +18,13 @@ ColumnLayout {
     id: inh
 
     required property var inhibitions
-    required property bool blocking
+    required property bool blockingAll
+    required property bool blockingSleep
+    property bool busyAll: false
+    property bool busySleep: false
     property bool available: true
-    property bool busy: false
-    signal blockingRequested(bool on)
+    signal blockAllRequested(bool on)
+    signal blockSleepRequested(bool on)
     signal allowRequested(string who, string why, bool allowed)
 
     readonly property var others: inhibitions.filter((e) => !e.own)
@@ -32,17 +36,30 @@ ColumnLayout {
         text: i18n("Sleep and screen locking")
     }
 
+    // Each switch follows its inhibition, not the click: if the call fails it
+    // falls back to where it was.
     PlasmaComponents3.Switch {
         Layout.fillWidth: true
-        text: i18n("Block manually")
-        checked: inh.blocking
-        enabled: inh.available && !inh.busy
+        text: i18n("Block sleep and screen locking")
+        checked: inh.blockingAll
+        enabled: inh.available && !inh.busyAll
         onToggled: {
-            inh.blockingRequested(checked);
-            // The switch follows the inhibition, not the click: if the call
-            // fails it falls back to where it was.
-            checked = Qt.binding(() => inh.blocking);
+            inh.blockAllRequested(checked);
+            checked = Qt.binding(() => inh.blockingAll);
         }
+    }
+
+    PlasmaComponents3.Switch {
+        Layout.fillWidth: true
+        text: i18n("Block sleep only")
+        checked: inh.blockingSleep
+        enabled: inh.available && !inh.busySleep
+        onToggled: {
+            inh.blockSleepRequested(checked);
+            checked = Qt.binding(() => inh.blockingSleep);
+        }
+        PlasmaComponents3.ToolTip.text: i18n("The screen still dims and locks. Middle-click the tray icon to toggle this.")
+        PlasmaComponents3.ToolTip.visible: hovered
     }
 
     PlasmaComponents3.Label {
@@ -93,7 +110,6 @@ ColumnLayout {
             PlasmaComponents3.Button {
                 Layout.alignment: Qt.AlignVCenter
                 text: row.modelData.allowed ? i18n("Block") : i18n("Allow")
-                enabled: !inh.busy
                 onClicked: inh.allowRequested(row.modelData.who, row.modelData.why, !row.modelData.allowed)
                 PlasmaComponents3.ToolTip.text: row.modelData.allowed
                     ? i18n("Ignore this request and let the machine sleep and lock as usual")

@@ -192,16 +192,20 @@ TestCase {
             ["sleep", "Running Script", "sleep", "block", 3],
             ["idle", "Running Script", "sleep", "block", 3],
             ["sleep:idle", "probe", "probe why", "block", 0],
-            ["sleep:idle", Logic.INHIBIT_APP, Logic.INHIBIT_REASON, "block", 3],
+            ["sleep:idle", Logic.INHIBIT_APP, Logic.INHIBIT_REASON_ALL, "block", 3],
+            ["sleep", Logic.INHIBIT_APP, Logic.INHIBIT_REASON_SLEEP, "block", 3],
+            ["sleep", Logic.INHIBIT_APP, "some other reason", "block", 3],
             ["short"],
         ]));
-        compare(got.length, 3);
+        compare(got.length, 5);
         compare(got[0].who, "Running Script");
         compare(got[0].what, ["sleep", "idle"]);
         verify(got[0].allowed);
         verify(!got[0].own);
         verify(!got[1].allowed, "flags 0 is a blocked request");
         verify(got[2].own);
+        verify(got[3].own, "the sleep-only block is ours too");
+        verify(!got[4].own, "only our own reasons count as ours");
         // The module's sequences index and have a length but are not arrays.
         var row = { length: 5, 0: { value: "sleep" }, 1: { value: "seq" }, 2: { value: "why" }, 3: { value: "block" }, 4: { value: 3 } };
         var seq = Logic.parseInhibitions({ length: 1, 0: row });

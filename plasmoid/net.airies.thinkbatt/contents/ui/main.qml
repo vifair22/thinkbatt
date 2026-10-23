@@ -38,15 +38,28 @@ PlasmoidItem {
     property bool busy: false
     property date now: new Date()
 
-    // Sleep blocking. The cookie is the plasmoid's own inhibition; it lives on
-    // plasmashell's D-Bus connection, so it and this property end together.
+    // Sleep blocking: the plasmoid's own two inhibitions (Inhibition.qml),
+    // and everything powerdevil lists, theirs included.
     property var inhibitions: []
-    property var inhibitCookie: null
-    readonly property bool blocking: inhibitCookie !== null
-    // What the switch last asked for, and whether an AddInhibition is still
-    // in flight: switching off before its reply must not leave a block behind.
-    property bool inhibitWanted: false
-    property bool inhibitPending: false
+    readonly property bool blocking: blockAll.active || blockSleep.active
+
+    Inhibition {
+        id: blockAll
+        types: Logic.INHIBIT_TYPES_ALL
+        reason: Logic.INHIBIT_REASON_ALL
+        onFailed: (message) => root.actionError = i18n("Power management: %1", message)
+        onChanged: listSettle.restart()
+    }
+
+    // Sleep only: the screen still dims and locks. The one a middle-click on
+    // the tray icon toggles.
+    Inhibition {
+        id: blockSleep
+        types: Logic.INHIBIT_TYPES_SLEEP
+        reason: Logic.INHIBIT_REASON_SLEEP
+        onFailed: (message) => root.actionError = i18n("Power management: %1", message)
+        onChanged: listSettle.restart()
+    }
 
     // The notification record (Logic.diffEvents), and packs whose override
     // the user just ended from the popup, which is not news to them.
@@ -62,7 +75,9 @@ PlasmoidItem {
     Plasmoid.status: PlasmaCore.Types.ActiveStatus
     toolTipMainText: i18n("thinkbatt")
     toolTipSubText: (error !== "" ? error : packs.map((p) => Logic.summary(p, now)).join("\n"))
-        + (blocking ? "\n" + i18n("Sleep and screen locking blocked") : "")
+        + (blockAll.active ? "\n" + i18n("Sleep and screen locking blocked")
+           : blockSleep.active ? "\n" + i18n("Sleep blocked") : "")
+        + "\n" + i18n("Middle-click to %1 sleep", blockSleep.active ? i18n("allow") : i18n("block"))
 
     function packByName(name) {
         for (let i = 0; i < packs.length; i++) {
@@ -159,34 +174,6 @@ PlasmoidItem {
                 inhibitions = Logic.parseInhibitions(reply.value);
             }
         });
-    }
-
-    function setBlocking(on) {
-        actionError = "";
-        inhibitWanted = on;
-        if (on && inhibitCookie === null && !inhibitPending) {
-            inhibitPending = true;
-            dbusCall("AddInhibition", [new DBus.uint32(Logic.INHIBIT_TYPES), new DBus.string(Logic.INHIBIT_APP),
-                                       new DBus.string(Logic.INHIBIT_REASON)], "(uss)",
-                     (cookie) => {
-                         inhibitPending = false;
-                         if (inhibitWanted) {
-                             inhibitCookie = cookie;
-                         } else {
-                             release(cookie);
-                         }
-                     },
-                     () => { inhibitPending = false; });
-        } else if (!on && inhibitCookie !== null) {
-            const cookie = inhibitCookie;
-            inhibitCookie = null;
-            release(cookie);
-        }
-        listSettle.restart();
-    }
-
-    function release(cookie) {
-        dbusCall("ReleaseInhibition", [new DBus.uint32(cookie)], "(u)", null);
     }
 
     function setAllowed(who, why, allowed) {
@@ -305,9 +292,16 @@ PlasmoidItem {
         property bool wasExpanded: false
 
         hoverEnabled: true
-        acceptedButtons: Qt.LeftButton
+        acceptedButtons: Qt.LeftButton | Qt.MiddleButton
         onPressed: wasExpanded = root.expanded
-        onClicked: root.expanded = !wasExpanded
+        onClicked: (mouse) => {
+            if (mouse.button === Qt.MiddleButton) {
+                root.actionError = "";
+                blockSleep.toggle();
+            } else {
+                root.expanded = !wasExpanded;
+            }
+        }
 
         Kirigami.Icon {
             anchors.fill: parent
@@ -425,10 +419,13 @@ PlasmoidItem {
                 InhibitControls {
                     Layout.fillWidth: true
                     inhibitions: root.inhibitions
-                    blocking: root.blocking
+                    blockingAll: blockAll.active
+                    blockingSleep: blockSleep.active
+                    busyAll: blockAll.pending
+                    busySleep: blockSleep.pending
                     available: powerdevil.registered
-                    busy: root.inhibitPending
-                    onBlockingRequested: (on) => root.setBlocking(on)
+                    onBlockAllRequested: (on) => { root.actionError = ""; blockAll.set(on); }
+                    onBlockSleepRequested: (on) => { root.actionError = ""; blockSleep.set(on); }
                     onAllowRequested: (who, why, allowed) => root.setAllowed(who, why, allowed)
                 }
             }

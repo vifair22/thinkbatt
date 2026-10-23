@@ -262,13 +262,16 @@ var POLICY_PATH = "/org/kde/Solid/PowerManagement/PolicyAgent";
 var POLICY_IFACE = "org.kde.Solid.PowerManagement.PolicyAgent";
 // PolicyAgent's RequiredPolicy bits: InterruptSession (1, sleep) and
 // ChangeScreenSettings (4, dimming and locking). Plasma's manual block asks for
-// the same pair.
-var INHIBIT_TYPES = 5;
-// Who and why the plasmoid's own inhibition is filed under. Other inhibitors
+// the pair; the sleep-only block for InterruptSession alone.
+var INHIBIT_TYPES_ALL = 5;
+var INHIBIT_TYPES_SLEEP = 1;
+// Who and why the plasmoid's own inhibitions are filed under. Other inhibitors
 // see these in their own lists, and the plasmoid uses them to tell its own
-// entry apart from everyone else's.
+// entries apart from everyone else's.
 var INHIBIT_APP = "thinkbatt";
-var INHIBIT_REASON = "Blocked from the thinkbatt tray";
+var INHIBIT_REASON_ALL = "Blocked from the thinkbatt tray";
+var INHIBIT_REASON_SLEEP = "Sleep blocked from the thinkbatt tray";
+var OWN_REASONS = [INHIBIT_REASON_ALL, INHIBIT_REASON_SLEEP];
 
 // unwrap takes the plain value out of the {value: x} wrappers the Plasma D-Bus
 // QML module puts around each field of a decoded struct.
@@ -312,7 +315,7 @@ function parseInhibitions(value) {
         var key = who + "\n" + why;
         var e = byKey[key];
         if (!e) {
-            e = { who: who, why: why, what: [], allowed: allowed, own: who === INHIBIT_APP && why === INHIBIT_REASON };
+            e = { who: who, why: why, what: [], allowed: allowed, own: who === INHIBIT_APP && OWN_REASONS.indexOf(why) >= 0 };
             byKey[key] = e;
             out.push(e);
         }

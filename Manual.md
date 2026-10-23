@@ -303,7 +303,9 @@ Its icon follows the first pack's charge, with a badge when a pack is not
 simply resting in its band: an arrow for a charge override, a refresh mark for
 a running calibration, a warning when the daemon cannot be reached; or, with
 none of those, the sleep-inhibited mark while sleep is blocked from the popup.
-The tooltip has a line per pack, and says when sleep is blocked.
+The tooltip has a line per pack, and says when sleep is blocked. A
+middle-click on the icon toggles the sleep-only block (see Sleep blocking)
+without opening the popup.
 
 The popup shows, per pack:
 
@@ -343,14 +345,21 @@ net.airies.thinkbatt` runs it in a window.
 ### Sleep blocking
 
 "Block sleep and screen locking" holds off suspend, screen dimming and locking
-until it is switched off, the same manual block Plasma's battery applet has. It
-is a powerdevil inhibition (PolicyAgent `AddInhibition`, InterruptSession and
-ChangeScreenSettings), filed as `thinkbatt` with the reason "Blocked from the
-thinkbatt tray". It lives on plasmashell's D-Bus connection, so it ends when
-the session does, or when plasmashell restarts; the switch starts off again
-with it.
+until it is switched off, the same manual block Plasma's battery applet has.
+"Block sleep only" holds off suspend alone: the screen still dims and locks on
+its usual timers, for a download or a build that should finish with the lid
+open but the session locked. A middle-click on the tray icon toggles the
+sleep-only block.
 
-Below the switch is every other inhibition powerdevil knows about: which app,
+Each is a powerdevil inhibition (PolicyAgent `AddInhibition`) filed as
+`thinkbatt`: InterruptSession and ChangeScreenSettings with the reason
+"Blocked from the thinkbatt tray", or InterruptSession alone with "Sleep
+blocked from the thinkbatt tray". The two are independent; with both on, the
+broader one wins. They live on plasmashell's D-Bus connection, so they end
+when the session does, or when plasmashell restarts; the switches start off
+again with them.
+
+Below the switches is every other inhibition powerdevil knows about: which app,
 what it holds off, and its stated reason. Each has a Block button that tells
 powerdevil to ignore that request (`SetInhibitionAllowed`), so a stuck video
 player or a forgotten download cannot keep the machine awake, and Allow to
