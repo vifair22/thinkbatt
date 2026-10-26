@@ -354,8 +354,8 @@ sleep-only block.
 Each is a powerdevil inhibition (PolicyAgent `AddInhibition`) filed as
 `thinkbatt`: InterruptSession and ChangeScreenSettings with the reason
 "Blocked from the thinkbatt tray", or InterruptSession alone with "Sleep
-blocked from the thinkbatt tray". The two are independent; with both on, the
-broader one wins. They live on plasmashell's D-Bus connection, so they end
+blocked from the thinkbatt tray". Only one is held at a time: switching one
+on (or middle-clicking while everything is blocked) releases the other. They live on plasmashell's D-Bus connection, so they end
 when the session does, or when plasmashell restarts; the switches start off
 again with them.
 

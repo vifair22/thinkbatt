@@ -39,7 +39,10 @@ PlasmoidItem {
     property date now: new Date()
 
     // Sleep blocking: the plasmoid's own two inhibitions (Inhibition.qml),
-    // and everything powerdevil lists, theirs included.
+    // and everything powerdevil lists, theirs included. The two are a choice,
+    // not a sum: asking for one drops the other, so the switches never both
+    // read on and a middle-click while everything is blocked narrows the block
+    // to sleep rather than leaving screen locking held off underneath.
     property var inhibitions: []
     readonly property bool blocking: blockAll.active || blockSleep.active
 
@@ -48,7 +51,12 @@ PlasmoidItem {
         types: Logic.INHIBIT_TYPES_ALL
         reason: Logic.INHIBIT_REASON_ALL
         onFailed: (message) => root.actionError = i18n("Power management: %1", message)
-        onChanged: listSettle.restart()
+        onChanged: {
+            if (wanted) {
+                blockSleep.set(false);
+            }
+            listSettle.restart();
+        }
     }
 
     // Sleep only: the screen still dims and locks. The one a middle-click on
@@ -58,7 +66,12 @@ PlasmoidItem {
         types: Logic.INHIBIT_TYPES_SLEEP
         reason: Logic.INHIBIT_REASON_SLEEP
         onFailed: (message) => root.actionError = i18n("Power management: %1", message)
-        onChanged: listSettle.restart()
+        onChanged: {
+            if (wanted) {
+                blockAll.set(false);
+            }
+            listSettle.restart();
+        }
     }
 
     // The notification record (Logic.diffEvents), and packs whose override
